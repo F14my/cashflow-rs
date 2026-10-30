@@ -37,7 +37,11 @@ impl IndicatorHistory {
             rate_percent: f64,
         }
         let err = |e: csv::Error| Error::new(format!("{}: {e}", path.display()));
-        let mut reader = csv::ReaderBuilder::new().delimiter(b';').trim(csv::Trim::All).from_path(path).map_err(err)?;
+        let mut reader = csv::ReaderBuilder::new()
+            .delimiter(b';')
+            .trim(csv::Trim::All)
+            .from_path(path)
+            .map_err(err)?;
         let mut points = Vec::new();
         for row in reader.deserialize::<Row>() {
             let row = row.map_err(err)?;
@@ -47,7 +51,10 @@ impl IndicatorHistory {
     }
 
     pub fn value_on(&self, indicator: &str, date: Date) -> Result<f64> {
-        let s = self.series.get(indicator).ok_or_else(|| Error::new(format!("unsupported indicator: {indicator:?}")))?;
+        let s = self
+            .series
+            .get(indicator)
+            .ok_or_else(|| Error::new(format!("unsupported indicator: {indicator:?}")))?;
         let idx = s.partition_point(|p| p.0 <= date);
         if idx == 0 {
             bail!("{indicator} is unavailable on {date}");

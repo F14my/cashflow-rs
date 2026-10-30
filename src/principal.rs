@@ -16,8 +16,14 @@ fn direction(v: f64) -> f64 {
 
 pub fn principal_payment_dates(deal: &Deal) -> Result<Vec<Date>> {
     match &deal.principal_rule {
-        Some(rule) if rule.period.is_some() => rule.schedule(deal.report_date, deal.maturity_date, true),
-        _ => Ok(if deal.maturity_date > deal.report_date { vec![deal.maturity_date] } else { vec![] }),
+        Some(rule) if rule.period.is_some() => {
+            rule.schedule(deal.report_date, deal.maturity_date, true)
+        }
+        _ => Ok(if deal.maturity_date > deal.report_date {
+            vec![deal.maturity_date]
+        } else {
+            vec![]
+        }),
     }
 }
 
@@ -29,8 +35,13 @@ pub fn build_principal_schedule(deal: &Deal, rates: &RateEngine) -> Result<Vec<P
         return reconcile_explicit_payments(deal);
     }
     match deal.discriminator {
-        Discriminator::Simple => Ok(vec![PrincipalPayment { date: deal.maturity_date, amount: deal.outstanding_principal }]),
-        Discriminator::Rgm => build_regular(deal.outstanding_principal, &principal_payment_dates(deal)?),
+        Discriminator::Simple => Ok(vec![PrincipalPayment {
+            date: deal.maturity_date,
+            amount: deal.outstanding_principal,
+        }]),
+        Discriminator::Rgm => {
+            build_regular(deal.outstanding_principal, &principal_payment_dates(deal)?)
+        }
         Discriminator::Ann => build_annuity(deal, rates),
     }
 }
@@ -44,9 +55,16 @@ pub fn build_regular(principal: f64, dates: &[Date]) -> Result<Vec<PrincipalPaym
     let regular = remaining / dates.len() as f64;
     let mut out = Vec::with_capacity(dates.len());
     for (i, d) in dates.iter().enumerate() {
-        let amount = if i + 1 == dates.len() { remaining } else { regular.min(remaining) };
+        let amount = if i + 1 == dates.len() {
+            remaining
+        } else {
+            regular.min(remaining)
+        };
         if amount > EPS {
-            out.push(PrincipalPayment { date: *d, amount: amount * dir });
+            out.push(PrincipalPayment {
+                date: *d,
+                amount: amount * dir,
+            });
         }
         remaining -= amount;
     }
@@ -79,8 +97,13 @@ pub fn build_annuity(deal: &Deal, rates: &RateEngine) -> Result<Vec<PrincipalPay
     let (mut prev, mut carried_interest) = match deal.accrued_interest {
         Some(a) => (deal.report_date, a.abs()),
         None => {
-            let from_rule = deal.principal_rule.as_ref().and_then(|r| r.last_on_or_before(deal.report_date));
-            let start = from_rule.map(|d| d.max(deal.deal_date)).unwrap_or_else(|| main_accrual_start(deal));
+            let from_rule = deal
+                .principal_rule
+                .as_ref()
+                .and_then(|r| r.last_on_or_before(deal.report_date));
+            let start = from_rule
+                .map(|d| d.max(deal.deal_date))
+                .unwrap_or_else(|| main_accrual_start(deal));
             (start, 0.0)
         }
     };
@@ -100,8 +123,15 @@ pub fn build_annuity(deal: &Deal, rates: &RateEngine) -> Result<Vec<PrincipalPay
         }
         let interest = balance * rates.period_rate(spec, prev, *d)? + carried_interest;
         carried_interest = 0.0;
-        let principal = if i + 1 == n { balance } else { (payment - interest).clamp(0.0, balance) };
-        out.push(PrincipalPayment { date: *d, amount: principal * dir });
+        let principal = if i + 1 == n {
+            balance
+        } else {
+            (payment - interest).clamp(0.0, balance)
+        };
+        out.push(PrincipalPayment {
+            date: *d,
+            amount: principal * dir,
+        });
         balance -= principal;
         prev = *d;
     }
@@ -116,11 +146,19 @@ pub fn reconcile_explicit_payments(deal: &Deal) -> Result<Vec<PrincipalPayment>>
             continue;
         }
         if p.date > deal.maturity_date {
-            bail!("principal payment date {} is after maturity {}", p.date, deal.maturity_date);
+            bail!(
+                "principal payment date {} is after maturity {}",
+                p.date,
+                deal.maturity_date
+            );
         }
         let magnitude = p.amount * dir;
         if magnitude < 0.0 {
-            bail!("principal payment has a sign opposite to the balance on {}: {}", p.date, p.amount);
+            bail!(
+                "principal payment has a sign opposite to the balance on {}: {}",
+                p.date,
+                p.amount
+            );
         }
         match grouped.iter_mut().find(|g| g.0 == p.date) {
             Some(g) => g.1 += magnitude,
@@ -137,14 +175,20 @@ pub fn reconcile_explicit_payments(deal: &Deal) -> Result<Vec<PrincipalPayment>>
         }
         let amount = requested.min(remaining);
         if amount > EPS {
-            out.push(PrincipalPayment { date, amount: amount * dir });
+            out.push(PrincipalPayment {
+                date,
+                amount: amount * dir,
+            });
             remaining -= amount;
         }
     }
     if remaining > 1e-6 {
         match out.last_mut() {
             Some(last) if last.date == deal.maturity_date => last.amount += remaining * dir,
-            _ => out.push(PrincipalPayment { date: deal.maturity_date, amount: remaining * dir }),
+            _ => out.push(PrincipalPayment {
+                date: deal.maturity_date,
+                amount: remaining * dir,
+            }),
         }
     }
     Ok(out)

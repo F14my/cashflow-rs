@@ -62,7 +62,9 @@ fn non_empty(v: &Option<String>) -> Option<&str> {
 }
 
 fn opt<T>(v: &Option<String>, col: &str, f: impl Fn(&str) -> Result<T>) -> Result<Option<T>> {
-    non_empty(v).map(|s| f(s).map_err(|e| e.context(format!("column {col:?}")))).transpose()
+    non_empty(v)
+        .map(|s| f(s).map_err(|e| e.context(format!("column {col:?}"))))
+        .transpose()
 }
 
 fn req_date(v: &str, col: &str) -> Result<Date> {
@@ -76,8 +78,12 @@ fn date_list(s: &str) -> Result<Vec<Date>> {
 fn dated_pairs(s: &str) -> Result<Vec<(Date, f64)>> {
     s.split_whitespace()
         .map(|item| {
-            let (d, v) = item.split_once(',').ok_or_else(|| Error::new(format!("invalid dated value: {item:?}")))?;
-            let v: f64 = v.parse().map_err(|_| Error::new(format!("not a number: {v:?}")))?;
+            let (d, v) = item
+                .split_once(',')
+                .ok_or_else(|| Error::new(format!("invalid dated value: {item:?}")))?;
+            let v: f64 = v
+                .parse()
+                .map_err(|_| Error::new(format!("not a number: {v:?}")))?;
             Ok((parse_date(d)?, v))
         })
         .collect()
@@ -91,13 +97,22 @@ fn dated_rates(v: &Option<String>, col: &str) -> Result<Vec<DatedRate>> {
         .collect())
 }
 
-fn schedule_rule(start: &Option<String>, period: &Option<String>, day: Option<i32>, prefix: &str) -> Result<Option<ScheduleRule>> {
+fn schedule_rule(
+    start: &Option<String>,
+    period: &Option<String>,
+    day: Option<i32>,
+    prefix: &str,
+) -> Result<Option<ScheduleRule>> {
     let start_date = opt(start, &format!("{prefix}_start_dttm"), parse_date)?;
     let period = opt(period, &format!("{prefix}_period_cd"), Period::parse)?;
     if start_date.is_none() && period.is_none() && day.is_none() {
         return Ok(None);
     }
-    Ok(Some(ScheduleRule { start_date, period, day_num: day }))
+    Ok(Some(ScheduleRule {
+        start_date,
+        period,
+        day_num: day,
+    }))
 }
 
 fn main_rate_spec(r: &DealRow) -> Result<RateSpec> {
@@ -112,10 +127,26 @@ fn main_rate_spec(r: &DealRow) -> Result<RateSpec> {
             r.interest_payment_rule_day_num,
             "interest_payment_rule",
         )?,
-        repricing_rule: schedule_rule(&r.repricing_rule_start_dttm, &r.repricing_rule_period_cd, r.repricing_rule_day_num, "repricing_rule")?,
-        repricing_dates: opt(&r.repricing_dttm_schedule, "repricing_dttm_schedule", date_list)?.unwrap_or_default(),
-        rate_schedule: dated_rates(&r.repricing_dttm_rate_schedule, "repricing_dttm_rate_schedule")?,
-        fixed_rate_schedule: dated_rates(&r.repricing_dttm_rate_schedule_fixed, "repricing_dttm_rate_schedule_fixed")?,
+        repricing_rule: schedule_rule(
+            &r.repricing_rule_start_dttm,
+            &r.repricing_rule_period_cd,
+            r.repricing_rule_day_num,
+            "repricing_rule",
+        )?,
+        repricing_dates: opt(
+            &r.repricing_dttm_schedule,
+            "repricing_dttm_schedule",
+            date_list,
+        )?
+        .unwrap_or_default(),
+        rate_schedule: dated_rates(
+            &r.repricing_dttm_rate_schedule,
+            "repricing_dttm_rate_schedule",
+        )?,
+        fixed_rate_schedule: dated_rates(
+            &r.repricing_dttm_rate_schedule_fixed,
+            "repricing_dttm_rate_schedule_fixed",
+        )?,
         cap: r.cap_limit_interest_rate,
         floor: r.floor_limit_interest_rate,
         coefficient: None,
@@ -125,14 +156,23 @@ fn main_rate_spec(r: &DealRow) -> Result<RateSpec> {
 }
 
 fn sub_rate_spec(r: &DealRow) -> Result<Option<RateSpec>> {
-    let Some(rate_type) = non_empty(&r.sub_rate_type_cd) else { return Ok(None) };
-    let Some(interest_rate) = r.sub_interest_rate else { bail!("column \"sub_interest_rate\" is required") };
+    let Some(rate_type) = non_empty(&r.sub_rate_type_cd) else {
+        return Ok(None);
+    };
+    let Some(interest_rate) = r.sub_interest_rate else {
+        bail!("column \"sub_interest_rate\" is required")
+    };
     Ok(Some(RateSpec {
         rate_type: RateType::parse(rate_type)?,
         interest_rate,
         indicator: non_empty(&r.sub_float_indicator).map(String::from),
         indicator_rate: None,
-        payment_rule: schedule_rule(&r.sub_payment_rule_start_dttm, &r.sub_payment_rule_period_cd, r.sub_payment_rule_day_num, "sub_payment_rule")?,
+        payment_rule: schedule_rule(
+            &r.sub_payment_rule_start_dttm,
+            &r.sub_payment_rule_period_cd,
+            r.sub_payment_rule_day_num,
+            "sub_payment_rule",
+        )?,
         repricing_rule: schedule_rule(
             &r.sub_repricing_rule_start_dttm,
             &r.sub_repricing_rule_period_cd,
@@ -157,7 +197,7 @@ fn to_deal(r: &DealRow) -> Result<Deal> {
             bail!("report_dttm and deal_report_dttm differ: {report_date} != {drd}");
         }
     }
-    Ok(Deal {
+    let deal = Deal {
         deal_id: r.deal_id,
         deal_date: req_date(&r.deal_dttm, "deal_dttm")?,
         report_date,
@@ -176,7 +216,8 @@ fn to_deal(r: &DealRow) -> Result<Deal> {
             r.regular_payment_rule_day_num,
             "regular_payment_rule",
         )?,
-        interest_payment_dates: opt(&r.interest_payment, "interest_payment", date_list)?.unwrap_or_default(),
+        interest_payment_dates: opt(&r.interest_payment, "interest_payment", date_list)?
+            .unwrap_or_default(),
         principal_payments: opt(&r.principal_payment, "principal_payment", dated_pairs)?
             .unwrap_or_default()
             .into_iter()
@@ -184,28 +225,78 @@ fn to_deal(r: &DealRow) -> Result<Deal> {
             .collect(),
         product: non_empty(&r.product).map(String::from),
         behavior_model: non_empty(&r.behavior_model_cd).map(String::from),
-    })
+    };
+    validate_deal(&deal)?;
+    Ok(deal)
+}
+
+fn validate_deal(deal: &Deal) -> Result<()> {
+    if deal.deal_date > deal.report_date {
+        bail!(
+            "deal_date {} is after report_date {}",
+            deal.deal_date,
+            deal.report_date
+        );
+    }
+    if deal.maturity_date <= deal.report_date {
+        bail!(
+            "maturity_date {} must be after report_date {}",
+            deal.maturity_date,
+            deal.report_date
+        );
+    }
+    if deal.currency.is_empty() {
+        bail!("currency_id is empty");
+    }
+    for (name, value) in [
+        ("current_principal_amt", deal.outstanding_principal),
+        ("interest_rate", deal.rate_spec.interest_rate),
+    ] {
+        if !value.is_finite() {
+            bail!("{name} must be finite");
+        }
+    }
+    Ok(())
 }
 
 pub fn parse_deals(path: &Path) -> Result<Vec<Deal>> {
+    let mut deals = Vec::new();
+    for_each_deal_chunk(path, usize::MAX, |mut chunk| {
+        deals.append(&mut chunk);
+        Ok(())
+    })?;
+    Ok(deals)
+}
+
+pub fn for_each_deal_chunk(
+    path: &Path,
+    chunk_size: usize,
+    mut consume: impl FnMut(Vec<Deal>) -> Result<()>,
+) -> Result<()> {
+    if chunk_size == 0 {
+        bail!("chunk size must be greater than zero");
+    }
     let mut reader = csv::ReaderBuilder::new()
         .delimiter(b';')
         .trim(csv::Trim::All)
         .from_path(path)
         .map_err(|e| Error::new(format!("{}: {e}", path.display())))?;
 
-    let mut deals = Vec::new();
+    let mut deals = Vec::with_capacity(chunk_size.min(100_000));
+    let mut seen = HashSet::new();
     for row in reader.deserialize::<DealRow>() {
         let row = row.map_err(|e| Error::new(format!("{}: {e}", path.display())))?;
+        if !seen.insert(row.deal_id) {
+            bail!("duplicate deal_id value: {}", row.deal_id);
+        }
         deals.push(to_deal(&row).map_err(|e| e.context(format!("deal_id={}", row.deal_id)))?);
+        if deals.len() == chunk_size {
+            consume(std::mem::take(&mut deals))?;
+            deals = Vec::with_capacity(chunk_size.min(100_000));
+        }
     }
-
-    let mut seen = HashSet::new();
-    let mut dups: Vec<i64> = deals.iter().filter(|d| !seen.insert(d.deal_id)).map(|d| d.deal_id).collect();
-    if !dups.is_empty() {
-        dups.sort();
-        dups.dedup();
-        bail!("duplicate deal_id values: {dups:?}");
+    if !deals.is_empty() {
+        consume(deals)?;
     }
-    Ok(deals)
+    Ok(())
 }

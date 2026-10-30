@@ -45,7 +45,10 @@ impl Lag {
     pub fn parse(s: &str) -> Result<Lag> {
         let s = s.trim();
         let (num, unit) = s.split_at(s.len().saturating_sub(1));
-        let n: i32 = num.trim_start_matches('+').parse().map_err(|_| crate::error::Error::new(format!("unsupported indicator lag: {s:?}")))?;
+        let n: i32 = num
+            .trim_start_matches('+')
+            .parse()
+            .map_err(|_| crate::error::Error::new(format!("unsupported indicator lag: {s:?}")))?;
         match unit {
             "M" | "m" => Ok(Lag::Months(n)),
             "D" | "d" => Ok(Lag::Days(n)),
@@ -123,6 +126,18 @@ pub struct CashFlow {
     pub interest_cf: f64,
     pub balance_before: f64,
     pub balance_after: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiscountedCashFlow {
+    pub cashflow: CashFlow,
+    pub curve_date: Date,
+    pub discount_time: f64,
+    pub zero_rate: f64,
+    pub discount_factor: f64,
+    pub discounted_principal_cf: f64,
+    pub discounted_interest_cf: f64,
+    pub discounted_total_cf: f64,
 }
 
 impl CashFlow {

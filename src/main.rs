@@ -1,48 +1,62 @@
+use cashflow::curves::{Compounding, CurveSet};
+use cashflow::discounting::discount_cashflow;
 use cashflow::indicators::IndicatorHistory;
-use cashflow::parser::parse_deals;
+use cashflow::parser::for_each_deal_chunk;
 use cashflow::{calculate_portfolio, CalcConfig, DealSummary};
+use std::collections::HashSet;
 use std::fmt::Write as _;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
 const USAGE: &str = "\
-cfcalc — расчёт платежей по телу и процентам
+cfcalc — расчёт и дисконтирование денежных потоков
 
 Использование:
-  cfcalc [--deals FILE] [--indicator CODE=FILE]... [--deal-id 1,16,29]
-         [--out FILE] [--summary FILE] [--threads N] [--act-act-as-365]
+  cfcalc --discount-curve FILE [--deals FILE] [--indicator CODE=FILE]...
+         [--discount-compounding continuous|annual] [--deal-id 1,16,29]
+         [--out FILE] [--summary FILE] [--threads N] [--chunk-size N]
+         [--act-act-as-365]
 
   --deals FILE          CSV сделок (`;`), по умолчанию data/deals.csv
   --indicator CODE=FILE история индикатора effective_date;rate_percent
                         (по умолчанию CBKEY1M=data/cbkey1m.csv)
+  --discount-curve FILE узлы curve_date;currency;tenor_days;zero_rate_percent
+  --discount-compounding continuous или annual (по умолчанию continuous)
   --deal-id LIST        считать только эти сделки
   --out FILE            CSV с потоками (по умолчанию stdout)
-  --summary FILE        CSV с итогами по сделкам (тело, проценты, поток)
+  --summary FILE        CSV с итогами по сделкам
   --threads N           число потоков (по умолчанию — все ядра)
+  --chunk-size N        сделок в одном чанке (по умолчанию 10000)
   --act-act-as-365      считать ACT/ACT как ACT/365 (как в эталонном Excel)
 ";
 
 struct Args {
     deals: PathBuf,
     indicators: Vec<(String, PathBuf)>,
-    deal_ids: Option<Vec<i64>>,
+    discount_curve: PathBuf,
+    compounding: Compounding,
+    deal_ids: Option<HashSet<i64>>,
     out: Option<PathBuf>,
     summary: Option<PathBuf>,
     threads: usize,
+    chunk_size: usize,
     cfg: CalcConfig,
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut a = Args {
-        deals: "data/deals.csv".into(),
-        indicators: vec![],
-        deal_ids: None,
-        out: None,
-        summary: None,
-        threads: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
-        cfg: CalcConfig::default(),
-    };
+    let mut deals = PathBuf::from("data/deals.csv");
+    let mut indicators = Vec::new();
+    let mut discount_curve = None;
+    let mut compounding = Compounding::Continuous;
+    let mut deal_ids = None;
+    let mut out = None;
+    let mut summary = None;
+    let mut threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let mut chunk_size = 10_000;
+    let mut cfg = CalcConfig::default();
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         let mut val = |name: &str| it.next().ok_or(format!("{name} requires a value"));
@@ -51,114 +65,215 @@ fn parse_args() -> Result<Args, String> {
                 print!("{USAGE}");
                 std::process::exit(0);
             }
-            "--deals" => a.deals = val("--deals")?.into(),
+            "--deals" => deals = val("--deals")?.into(),
             "--indicator" => {
-                let v = val("--indicator")?;
-                let (k, p) = v.split_once('=').ok_or("--indicator expects CODE=FILE")?;
-                a.indicators.push((k.to_string(), p.into()));
+                let value = val("--indicator")?;
+                let (code, path) = value
+                    .split_once('=')
+                    .ok_or("--indicator expects CODE=FILE")?;
+                indicators.push((code.to_string(), path.into()));
+            }
+            "--discount-curve" => discount_curve = Some(val("--discount-curve")?.into()),
+            "--discount-compounding" => {
+                compounding = Compounding::parse(&val("--discount-compounding")?)
+                    .map_err(|e| e.to_string())?
             }
             "--deal-id" => {
                 let ids = val("--deal-id")?
                     .split(',')
-                    .map(|s| s.trim().parse::<i64>().map_err(|_| format!("bad deal id {s:?}")))
-                    .collect::<Result<Vec<_>, _>>()?;
-                a.deal_ids = Some(ids);
+                    .map(|s| {
+                        s.trim()
+                            .parse::<i64>()
+                            .map_err(|_| format!("bad deal id {s:?}"))
+                    })
+                    .collect::<Result<HashSet<_>, _>>()?;
+                deal_ids = Some(ids);
             }
-            "--out" => a.out = Some(val("--out")?.into()),
-            "--summary" => a.summary = Some(val("--summary")?.into()),
-            "--threads" => a.threads = val("--threads")?.parse().map_err(|_| "bad --threads")?,
-            "--act-act-as-365" => a.cfg.act_act_as_365 = true,
+            "--out" => out = Some(val("--out")?.into()),
+            "--summary" => summary = Some(val("--summary")?.into()),
+            "--threads" => threads = val("--threads")?.parse().map_err(|_| "bad --threads")?,
+            "--chunk-size" => {
+                chunk_size = val("--chunk-size")?
+                    .parse()
+                    .map_err(|_| "bad --chunk-size")?
+            }
+            "--act-act-as-365" => cfg.act_act_as_365 = true,
             other => return Err(format!("unknown argument {other:?}\n\n{USAGE}")),
         }
     }
-    if a.indicators.is_empty() {
-        a.indicators.push(("CBKEY1M".into(), "data/cbkey1m.csv".into()));
+    if threads == 0 || chunk_size == 0 {
+        return Err("--threads and --chunk-size must be greater than zero".into());
     }
-    Ok(a)
+    if indicators.is_empty() {
+        indicators.push(("CBKEY1M".into(), "data/cbkey1m.csv".into()));
+    }
+    let discount_curve =
+        discount_curve.ok_or_else(|| format!("--discount-curve is required\n\n{USAGE}"))?;
+    Ok(Args {
+        deals,
+        indicators,
+        discount_curve,
+        compounding,
+        deal_ids,
+        out,
+        summary,
+        threads,
+        chunk_size,
+        cfg,
+    })
+}
+
+fn output_writer(path: &Option<PathBuf>) -> Result<Box<dyn Write>, String> {
+    match path {
+        Some(path) => std::fs::File::create(path)
+            .map(|file| Box::new(BufWriter::new(file)) as Box<dyn Write>)
+            .map_err(|e| format!("{}: {e}", path.display())),
+        None => Ok(Box::new(BufWriter::new(std::io::stdout()))),
+    }
 }
 
 fn run() -> Result<(), String> {
     let args = parse_args()?;
-    let t0 = Instant::now();
-
-    let mut deals = parse_deals(&args.deals).map_err(|e| e.to_string())?;
-    if let Some(ids) = &args.deal_ids {
-        deals.retain(|d| ids.contains(&d.deal_id));
-        if let Some(missing) = ids.iter().find(|id| !deals.iter().any(|d| d.deal_id == **id)) {
-            return Err(format!("deal_id={missing} not found"));
-        }
-    }
-    let mut hist = IndicatorHistory::new();
+    let started = Instant::now();
+    let mut indicators = IndicatorHistory::new();
     for (code, path) in &args.indicators {
-        hist.load_percent_csv(code, path).map_err(|e| e.to_string())?;
+        indicators
+            .load_percent_csv(code, path)
+            .map_err(|e| e.to_string())?;
+    }
+    let curves = CurveSet::load_percent_csv(&args.discount_curve, args.compounding)
+        .map_err(|e| e.to_string())?;
+
+    let mut output = output_writer(&args.out)?;
+    output
+        .write_all(b"deal_id;cashflow_date;currency;interest_period_start;interest_period_end;principal_cf;interest_cf;total_cf;balance_before;balance_after;curve_date;discount_time;zero_rate;discount_factor;discounted_principal_cf;discounted_interest_cf;discounted_total_cf\n")
+        .map_err(|e| e.to_string())?;
+    let mut summary_output = args
+        .summary
+        .as_ref()
+        .map(|path| {
+            std::fs::File::create(path)
+                .map(BufWriter::new)
+                .map_err(|e| format!("{}: {e}", path.display()))
+        })
+        .transpose()?;
+    if let Some(writer) = summary_output.as_mut() {
+        writer
+            .write_all(b"deal_id;principal;interest;total_cf;pv_principal;pv_interest;npv\n")
+            .map_err(|e| e.to_string())?;
     }
 
-    let t_calc = Instant::now();
-    let load_time = t_calc.duration_since(t0);
-    let results = calculate_portfolio(&deals, &hist, &args.cfg, args.threads);
-    let calc_time = t_calc.elapsed();
+    let mut found = HashSet::new();
+    let mut total = DealSummary::default();
+    let mut deal_count = 0usize;
+    let mut ok_count = 0usize;
+    let mut errors = 0usize;
+    let mut line = String::with_capacity(512);
 
-    let mut buf = String::with_capacity(1 << 20);
-    buf.push_str("deal_id;cashflow_date;currency;interest_period_start;interest_period_end;principal_cf;interest_cf;total_cf;balance_before;balance_after\n");
-
-    let mut errors = 0;
-    let mut summaries = Vec::new();
-    for r in &results {
-        match r {
-            Err(e) => {
-                errors += 1;
-                eprintln!("ERROR {e}");
-            }
-            Ok(res) => {
-                for c in &res.cashflows {
-                    push_i64(&mut buf, c.deal_id);
-                    buf.push(';');
-                    push_date(&mut buf, c.cashflow_date);
-                    buf.push(';');
-                    buf.push_str(&c.currency);
-                    buf.push(';');
-                    push_date(&mut buf, c.interest_period_start);
-                    buf.push(';');
-                    push_date(&mut buf, c.interest_period_end);
-                    for x in [c.principal_cf, c.interest_cf, c.total(), c.balance_before, c.balance_after] {
-                        buf.push(';');
-                        push_money(&mut buf, x);
-                    }
-                    buf.push('\n');
+    for_each_deal_chunk(&args.deals, args.chunk_size, |mut deals| {
+        if let Some(wanted) = &args.deal_ids {
+            deals.retain(|deal| {
+                let keep = wanted.contains(&deal.deal_id);
+                if keep {
+                    found.insert(deal.deal_id);
                 }
-                summaries.push(&res.summary);
+                keep
+            });
+        }
+        deal_count += deals.len();
+        let results = calculate_portfolio(&deals, &indicators, &args.cfg, args.threads);
+        for (result, deal) in results.into_iter().zip(&deals) {
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    errors += 1;
+                    eprintln!("ERROR {error}");
+                    continue;
+                }
+            };
+            let curve = match curves.curve_on(&deal.currency, deal.report_date) {
+                Ok(curve) => curve,
+                Err(error) => {
+                    errors += 1;
+                    eprintln!("ERROR deal_id={}: {error}", deal.deal_id);
+                    continue;
+                }
+            };
+            let discounted = match result
+                .cashflows
+                .into_iter()
+                .map(|cashflow| discount_cashflow(cashflow, deal.report_date, curve))
+                .collect::<cashflow::Result<Vec<_>>>()
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    errors += 1;
+                    eprintln!("ERROR deal_id={}: {error}", deal.deal_id);
+                    continue;
+                }
+            };
+            let mut summary = result.summary;
+            for discounted_cf in discounted {
+                summary.pv_principal += discounted_cf.discounted_principal_cf;
+                summary.pv_interest += discounted_cf.discounted_interest_cf;
+                summary.npv += discounted_cf.discounted_total_cf;
+                line.clear();
+                write_cashflow(&mut line, &discounted_cf);
+                output
+                    .write_all(line.as_bytes())
+                    .map_err(|e| cashflow::Error::new(e.to_string()))?;
             }
+            if let Some(writer) = summary_output.as_mut() {
+                line.clear();
+                write_summary(&mut line, &summary);
+                writer
+                    .write_all(line.as_bytes())
+                    .map_err(|e| cashflow::Error::new(e.to_string()))?;
+            }
+            total.principal += summary.principal;
+            total.interest += summary.interest;
+            total.total_cf += summary.total_cf;
+            total.pv_principal += summary.pv_principal;
+            total.pv_interest += summary.pv_interest;
+            total.npv += summary.npv;
+            ok_count += 1;
+        }
+        output
+            .flush()
+            .map_err(|e| cashflow::Error::new(e.to_string()))?;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
+
+    if let Some(wanted) = &args.deal_ids {
+        let mut missing: Vec<_> = wanted.difference(&found).copied().collect();
+        if !missing.is_empty() {
+            missing.sort_unstable();
+            return Err(format!("deal_id values not found: {missing:?}"));
         }
     }
-    match &args.out {
-        Some(p) => std::fs::write(p, &buf).map_err(|e| format!("{}: {e}", p.display()))?,
-        None => std::io::stdout().write_all(buf.as_bytes()).map_err(|e| e.to_string())?,
+    if let Some(writer) = summary_output.as_mut() {
+        line.clear();
+        line.push_str("TOTAL;");
+        write_summary_values(&mut line, &total);
+        line.push('\n');
+        writer
+            .write_all(line.as_bytes())
+            .map_err(|e| e.to_string())?;
+        writer.flush().map_err(|e| e.to_string())?;
     }
-
-    let mut s = String::from("deal_id;principal;interest;total_cf\n");
-    let mut tot = DealSummary::default();
-    for d in &summaries {
-        let _ = writeln!(s, "{};{:.2};{:.2};{:.2}", d.deal_id, d.principal, d.interest, d.total_cf);
-        tot.principal += d.principal;
-        tot.interest += d.interest;
-        tot.total_cf += d.total_cf;
+    output.flush().map_err(|e| e.to_string())?;
+    if args.out.is_some() && args.summary.is_none() {
+        println!(
+            "TOTAL principal={:.2} interest={:.2} total_cf={:.2} pv_principal={:.2} pv_interest={:.2} npv={:.2}",
+            total.principal, total.interest, total.total_cf, total.pv_principal, total.pv_interest, total.npv
+        );
     }
-    let _ = writeln!(s, "TOTAL;{:.2};{:.2};{:.2}", tot.principal, tot.interest, tot.total_cf);
-    match &args.summary {
-        Some(p) => std::fs::write(p, &s).map_err(|e| format!("{}: {e}", p.display()))?,
-        None if args.out.is_some() => print!("{s}"),
-        None => {}
-    }
-
     eprintln!(
-        "deals: {}  ok: {}  errors: {}  load: {:.1} ms  calc: {:.1} ms  total: {:.1} ms  threads: {}",
-        results.len(),
-        results.len() - errors,
-        errors,
-        load_time.as_secs_f64() * 1e3,
-        calc_time.as_secs_f64() * 1e3,
-        t0.elapsed().as_secs_f64() * 1e3,
-        args.threads
+        "deals: {deal_count}  ok: {ok_count}  errors: {errors}  total: {:.1} ms  threads: {}  chunk: {}",
+        started.elapsed().as_secs_f64() * 1e3,
+        args.threads,
+        args.chunk_size
     );
     if errors > 0 {
         return Err(format!("{errors} deal(s) failed"));
@@ -166,58 +281,53 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
-fn push_u64(buf: &mut String, mut v: u64) {
-    let mut tmp = [0u8; 20];
-    let mut i = tmp.len();
-    loop {
-        i -= 1;
-        tmp[i] = b'0' + (v % 10) as u8;
-        v /= 10;
-        if v == 0 {
-            break;
-        }
-    }
-    buf.push_str(std::str::from_utf8(&tmp[i..]).unwrap());
+fn write_cashflow(line: &mut String, discounted: &cashflow::DiscountedCashFlow) {
+    let cf = &discounted.cashflow;
+    let _ = writeln!(
+        line,
+        "{};{};{};{};{};{:.2};{:.2};{:.2};{:.2};{:.2};{};{:.10};{:.10};{:.12};{:.2};{:.2};{:.2}",
+        cf.deal_id,
+        cf.cashflow_date,
+        cf.currency,
+        cf.interest_period_start,
+        cf.interest_period_end,
+        cf.principal_cf,
+        cf.interest_cf,
+        cf.total(),
+        cf.balance_before,
+        cf.balance_after,
+        discounted.curve_date,
+        discounted.discount_time,
+        discounted.zero_rate,
+        discounted.discount_factor,
+        discounted.discounted_principal_cf,
+        discounted.discounted_interest_cf,
+        discounted.discounted_total_cf
+    );
 }
 
-fn push_i64(buf: &mut String, v: i64) {
-    if v < 0 {
-        buf.push('-');
-    }
-    push_u64(buf, v.unsigned_abs());
+fn write_summary(line: &mut String, summary: &DealSummary) {
+    let _ = write!(line, "{};", summary.deal_id);
+    write_summary_values(line, summary);
+    line.push('\n');
 }
 
-fn push_money(buf: &mut String, v: f64) {
-    let cents = (v * 100.0).round() as i64;
-    if cents < 0 {
-        buf.push('-');
-    }
-    let a = cents.unsigned_abs();
-    push_u64(buf, a / 100);
-    buf.push('.');
-    buf.push((b'0' + (a % 100 / 10) as u8) as char);
-    buf.push((b'0' + (a % 10) as u8) as char);
-}
-
-fn push_2(buf: &mut String, v: u32) {
-    buf.push((b'0' + (v / 10) as u8) as char);
-    buf.push((b'0' + (v % 10) as u8) as char);
-}
-
-fn push_date(buf: &mut String, d: cashflow::dates::Date) {
-    use chrono::Datelike;
-    let (y, m, dd) = (d.year(), d.month(), d.day());
-    push_2(buf, (y / 100) as u32);
-    push_2(buf, (y % 100) as u32);
-    buf.push('-');
-    push_2(buf, m);
-    buf.push('-');
-    push_2(buf, dd);
+fn write_summary_values(line: &mut String, summary: &DealSummary) {
+    let _ = write!(
+        line,
+        "{:.2};{:.2};{:.2};{:.2};{:.2};{:.2}",
+        summary.principal,
+        summary.interest,
+        summary.total_cf,
+        summary.pv_principal,
+        summary.pv_interest,
+        summary.npv
+    );
 }
 
 fn main() {
-    if let Err(e) = run() {
-        eprintln!("{e}");
+    if let Err(error) = run() {
+        eprintln!("{error}");
         std::process::exit(1);
     }
 }

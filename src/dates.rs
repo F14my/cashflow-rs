@@ -68,7 +68,9 @@ impl Period {
             return Ok(Period::EndDate);
         }
         let (num, unit) = s.split_at(s.len().saturating_sub(1));
-        let n: u32 = num.parse().map_err(|_| Error::new(format!("unsupported period: {s:?}")))?;
+        let n: u32 = num
+            .parse()
+            .map_err(|_| Error::new(format!("unsupported period: {s:?}")))?;
         if n == 0 {
             bail!("unsupported period: {s:?}");
         }
@@ -117,7 +119,9 @@ impl ScheduleRule {
             Period::Months(step) => {
                 let day = self.day_num.unwrap_or(anchor.day() as i32);
                 let mut k: i32 = 0;
-                let gap = (after.year() * 12 + after.month() as i32) - (anchor.year() * 12 + anchor.month() as i32) - 1;
+                let gap = (after.year() * 12 + after.month() as i32)
+                    - (anchor.year() * 12 + anchor.month() as i32)
+                    - 1;
                 if gap > 0 {
                     k = (gap / step as i32) * step as i32;
                 }
@@ -168,7 +172,10 @@ impl ScheduleRule {
             _ if anchor > limit => None,
             _ => {
                 let before_anchor = anchor.add_days(-1);
-                self.dates_between(before_anchor, limit).ok()?.last().copied()
+                self.dates_between(before_anchor, limit)
+                    .ok()?
+                    .last()
+                    .copied()
             }
         }
     }
@@ -202,7 +209,14 @@ impl DayCount {
                     let y = cur.year();
                     let next_year = NaiveDate::from_ymd_opt(y + 1, 1, 1).expect("valid date");
                     let seg_end = if end < next_year { end } else { next_year };
-                    let denom = if NaiveDate::from_ymd_opt(y, 1, 1).expect("valid date").leap_year() { 366.0 } else { 365.0 };
+                    let denom = if NaiveDate::from_ymd_opt(y, 1, 1)
+                        .expect("valid date")
+                        .leap_year()
+                    {
+                        366.0
+                    } else {
+                        365.0
+                    };
                     acc += cur.days_until(seg_end) as f64 / denom;
                     cur = seg_end;
                 }

@@ -21,12 +21,24 @@ impl CalcConfig {
 }
 
 fn has_period(rule: &Option<crate::dates::ScheduleRule>) -> bool {
-    matches!(rule.as_ref().and_then(|r| r.period), Some(Period::Months(_)) | Some(Period::Days(_)) | Some(Period::EndDate))
+    matches!(
+        rule.as_ref().and_then(|r| r.period),
+        Some(Period::Months(_)) | Some(Period::Days(_)) | Some(Period::EndDate)
+    )
 }
 
 fn previous_principal_date(deal: &Deal) -> Option<Date> {
-    let explicit = deal.principal_payments.iter().map(|p| p.date).filter(|d| *d <= deal.report_date).max();
-    explicit.or_else(|| deal.principal_rule.as_ref().and_then(|r| r.last_on_or_before(deal.report_date)))
+    let explicit = deal
+        .principal_payments
+        .iter()
+        .map(|p| p.date)
+        .filter(|d| *d <= deal.report_date)
+        .max();
+    explicit.or_else(|| {
+        deal.principal_rule
+            .as_ref()
+            .and_then(|r| r.last_on_or_before(deal.report_date))
+    })
 }
 
 pub fn main_accrual_start(deal: &Deal) -> Date {
@@ -41,11 +53,15 @@ pub fn main_accrual_start(deal: &Deal) -> Date {
             .map(|d| d.max(deal.deal_date))
             .unwrap_or(report.max(deal.deal_date));
     } else if has_period(&deal.rate_spec.payment_rule) {
-        deal.rate_spec.payment_rule.as_ref().and_then(|r| r.last_on_or_before(report))
+        deal.rate_spec
+            .payment_rule
+            .as_ref()
+            .and_then(|r| r.last_on_or_before(report))
     } else {
         previous_principal_date(deal)
     };
-    prev.map(|d| d.max(deal.deal_date)).unwrap_or(deal.deal_date)
+    prev.map(|d| d.max(deal.deal_date))
+        .unwrap_or(deal.deal_date)
 }
 
 pub fn sub_accrual_start(deal: &Deal, sub: &RateSpec) -> Date {
@@ -57,7 +73,9 @@ pub fn sub_accrual_start(deal: &Deal, sub: &RateSpec) -> Date {
         }
     }
     let prev = if has_period(&sub.payment_rule) {
-        sub.payment_rule.as_ref().and_then(|r| r.last_on_or_before(report))
+        sub.payment_rule
+            .as_ref()
+            .and_then(|r| r.last_on_or_before(report))
     } else {
         previous_principal_date(deal)
     };
@@ -65,12 +83,24 @@ pub fn sub_accrual_start(deal: &Deal, sub: &RateSpec) -> Date {
     prev.map(|d| d.max(floor)).unwrap_or(floor)
 }
 
-fn interest_payment_dates(deal: &Deal, spec: &RateSpec, principal_dates: &[Date], explicit: &[Date]) -> Result<Vec<Date>> {
+fn interest_payment_dates(
+    deal: &Deal,
+    spec: &RateSpec,
+    principal_dates: &[Date],
+    explicit: &[Date],
+) -> Result<Vec<Date>> {
     let (report, maturity) = (deal.report_date, deal.maturity_date);
     let mut dates: Vec<Date> = if !explicit.is_empty() {
-        explicit.iter().copied().filter(|d| report < *d && *d <= maturity).collect()
+        explicit
+            .iter()
+            .copied()
+            .filter(|d| report < *d && *d <= maturity)
+            .collect()
     } else if has_period(&spec.payment_rule) {
-        spec.payment_rule.as_ref().unwrap().schedule(report, maturity, true)?
+        spec.payment_rule
+            .as_ref()
+            .unwrap()
+            .schedule(report, maturity, true)?
     } else {
         principal_dates.to_vec()
     };
@@ -90,7 +120,11 @@ struct Leg<'a> {
     period_start: Date,
 }
 
-pub fn build_cashflows(deal: &Deal, indicators: &dyn IndicatorSource, cfg: &CalcConfig) -> Result<Vec<CashFlow>> {
+pub fn build_cashflows(
+    deal: &Deal,
+    indicators: &dyn IndicatorSource,
+    cfg: &CalcConfig,
+) -> Result<Vec<CashFlow>> {
     let rates = RateEngine::new(deal, indicators, cfg.day_count(deal));
     let principal = build_principal_schedule(deal, &rates)?;
     let mut principal_by_date: BTreeMap<Date, f64> = BTreeMap::new();
@@ -105,7 +139,12 @@ pub fn build_cashflows(deal: &Deal, indicators: &dyn IndicatorSource, cfg: &Calc
     };
     let mut legs = vec![Leg {
         spec: &deal.rate_spec,
-        pay_dates: interest_payment_dates(deal, &deal.rate_spec, &principal_dates, &deal.interest_payment_dates)?,
+        pay_dates: interest_payment_dates(
+            deal,
+            &deal.rate_spec,
+            &principal_dates,
+            &deal.interest_payment_dates,
+        )?,
         accrued_from: main_from,
         accrued: main_accrued,
         period_start: main_from,
