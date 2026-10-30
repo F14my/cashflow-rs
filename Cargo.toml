@@ -1,0 +1,23 @@
+[package]
+name = "cashflow-rs"
+version = "0.2.0"
+edition = "2021"
+description = "Расчёт платежей по телу и процентам по сделкам"
+
+[lib]
+name = "cashflow"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cfcalc"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
+csv = "1"
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
