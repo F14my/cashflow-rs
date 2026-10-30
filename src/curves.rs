@@ -28,8 +28,10 @@ pub struct CurvePoint {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ZeroCurve {
+    pub curve_type: String,
     pub curve_date: Date,
     pub currency: String,
+    pub scenario: String,
     pub points: Vec<CurvePoint>,
     pub compounding: Compounding,
 }
@@ -38,12 +40,25 @@ impl ZeroCurve {
     pub fn new(
         curve_date: Date,
         currency: impl Into<String>,
+        points: Vec<CurvePoint>,
+        compounding: Compounding,
+    ) -> Result<Self> {
+        Self::new_named("G_CURVE", curve_date, currency, "BASE", points, compounding)
+    }
+
+    pub fn new_named(
+        curve_type: impl Into<String>,
+        curve_date: Date,
+        currency: impl Into<String>,
+        scenario: impl Into<String>,
         mut points: Vec<CurvePoint>,
         compounding: Compounding,
     ) -> Result<Self> {
+        let curve_type = curve_type.into().trim().to_ascii_uppercase();
         let currency = currency.into().trim().to_ascii_uppercase();
-        if currency.is_empty() {
-            bail!("discount curve currency is empty");
+        let scenario = scenario.into().trim().to_ascii_uppercase();
+        if curve_type.is_empty() || currency.is_empty() || scenario.is_empty() {
+            bail!("curve type, currency and scenario must not be empty");
         }
         if points.is_empty() {
             bail!("discount curve {currency} on {curve_date} has no points");
@@ -62,8 +77,10 @@ impl ZeroCurve {
             bail!("discount curve {currency} on {curve_date} has duplicate tenors");
         }
         Ok(Self {
+            curve_type,
             curve_date,
             currency,
+            scenario,
             points,
             compounding,
         })
@@ -103,15 +120,29 @@ impl ZeroCurve {
 
 #[derive(Clone, Debug, Default)]
 pub struct CurveSet {
-    curves: HashMap<String, BTreeMap<Date, ZeroCurve>>,
+    curves: HashMap<(String, String, String), BTreeMap<Date, ZeroCurve>>,
+}
+
+pub trait CurveProvider {
+    fn get_curve(
+        &self,
+        curve_type: &str,
+        currency: &str,
+        report_date: Date,
+        scenario: &str,
+    ) -> Result<ZeroCurve>;
 }
 
 impl CurveSet {
     pub fn load_percent_csv(path: &Path, compounding: Compounding) -> Result<Self> {
         #[derive(Deserialize)]
         struct Row {
+            #[serde(default = "default_curve_type")]
+            curve_type: String,
             curve_date: Date,
             currency: String,
+            #[serde(default = "default_scenario")]
+            scenario: String,
             tenor_days: u32,
             zero_rate_percent: f64,
         }
@@ -121,14 +152,19 @@ impl CurveSet {
             .trim(csv::Trim::All)
             .from_path(path)
             .map_err(|e| Error::new(format!("{}: {e}", path.display())))?;
-        let mut grouped: HashMap<(String, Date), Vec<CurvePoint>> = HashMap::new();
+        let mut grouped: HashMap<(String, String, String, Date), Vec<CurvePoint>> = HashMap::new();
         for row in reader.deserialize::<Row>() {
             let row = row.map_err(|e| Error::new(format!("{}: {e}", path.display())))?;
             if !row.zero_rate_percent.is_finite() {
                 bail!("{}: non-finite zero rate", path.display());
             }
             grouped
-                .entry((row.currency.trim().to_ascii_uppercase(), row.curve_date))
+                .entry((
+                    row.curve_type.trim().to_ascii_uppercase(),
+                    row.currency.trim().to_ascii_uppercase(),
+                    row.scenario.trim().to_ascii_uppercase(),
+                    row.curve_date,
+                ))
                 .or_default()
                 .push(CurvePoint {
                     tenor_days: row.tenor_days,
@@ -139,20 +175,35 @@ impl CurveSet {
             bail!("{}: no discount curves", path.display());
         }
         let mut set = Self::default();
-        for ((currency, date), points) in grouped {
-            let curve = ZeroCurve::new(date, &currency, points, compounding)?;
-            set.curves.entry(currency).or_default().insert(date, curve);
+        for ((curve_type, currency, scenario, date), points) in grouped {
+            let curve =
+                ZeroCurve::new_named(&curve_type, date, &currency, &scenario, points, compounding)?;
+            set.curves
+                .entry((curve_type, currency, scenario))
+                .or_default()
+                .insert(date, curve);
         }
         Ok(set)
     }
 
     pub fn curve_on(&self, currency: &str, report_date: Date) -> Result<&ZeroCurve> {
+        self.curve_for("G_CURVE", currency, report_date, "BASE")
+    }
+
+    pub fn curve_for(
+        &self,
+        curve_type: &str,
+        currency: &str,
+        report_date: Date,
+        scenario: &str,
+    ) -> Result<&ZeroCurve> {
+        let curve_type = curve_type.trim().to_ascii_uppercase();
         let code = currency.trim().to_ascii_uppercase();
-        let by_date = self.curves.get(&code).ok_or_else(|| {
-            Error::new(format!(
-                "discount curve is unavailable for currency {code:?}"
-            ))
-        })?;
+        let scenario = scenario.trim().to_ascii_uppercase();
+        let by_date = self
+            .curves
+            .get(&(curve_type.clone(), code.clone(), scenario.clone()))
+            .ok_or_else(|| Error::new(format!("discount curve is unavailable for type={curve_type:?}, currency={code:?}, scenario={scenario:?}")))?;
         by_date
             .range(..=report_date)
             .next_back()
@@ -163,6 +214,52 @@ impl CurveSet {
                 ))
             })
     }
+
+    pub fn from_curves(curves: Vec<ZeroCurve>) -> Result<Self> {
+        let mut set = Self::default();
+        for curve in curves {
+            let key = (
+                curve.curve_type.clone(),
+                curve.currency.clone(),
+                curve.scenario.clone(),
+            );
+            if set
+                .curves
+                .entry(key)
+                .or_default()
+                .insert(curve.curve_date, curve)
+                .is_some()
+            {
+                bail!("duplicate curve identity");
+            }
+        }
+        Ok(set)
+    }
+
+    pub fn curves(&self) -> impl Iterator<Item = &ZeroCurve> {
+        self.curves.values().flat_map(|by_date| by_date.values())
+    }
+}
+
+impl CurveProvider for CurveSet {
+    fn get_curve(
+        &self,
+        curve_type: &str,
+        currency: &str,
+        report_date: Date,
+        scenario: &str,
+    ) -> Result<ZeroCurve> {
+        self.curve_for(curve_type, currency, report_date, scenario)
+            .cloned()
+    }
+}
+
+fn default_curve_type() -> String {
+    "G_CURVE".into()
+}
+
+fn default_scenario() -> String {
+    "BASE".into()
 }
 
 #[cfg(test)]

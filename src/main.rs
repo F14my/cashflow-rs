@@ -1,3 +1,4 @@
+use cashflow::curve_store::CurveStore;
 use cashflow::curves::{Compounding, CurveSet};
 use cashflow::discounting::discount_cashflow;
 use cashflow::indicators::IndicatorHistory;
@@ -13,7 +14,8 @@ const USAGE: &str = "\
 cfcalc — расчёт и дисконтирование денежных потоков
 
 Использование:
-  cfcalc --discount-curve FILE [--deals FILE] [--indicator CODE=FILE]...
+  cfcalc (--discount-curve FILE | --curve-db FILE) [--deals FILE]
+         [--curve-type NAME] [--scenario NAME] [--indicator CODE=FILE]...
          [--discount-compounding continuous|annual] [--deal-id 1,16,29]
          [--out FILE] [--summary FILE] [--threads N] [--chunk-size N]
          [--act-act-as-365]
@@ -22,6 +24,9 @@ cfcalc — расчёт и дисконтирование денежных по�
   --indicator CODE=FILE история индикатора effective_date;rate_percent
                         (по умолчанию CBKEY1M=data/cbkey1m.csv)
   --discount-curve FILE узлы curve_date;currency;tenor_days;zero_rate_percent
+  --curve-db FILE        SQLite-хранилище, подготовленное curve_admin
+  --curve-type NAME      тип кривой (по умолчанию G_CURVE)
+  --scenario NAME        сценарий (по умолчанию BASE)
   --discount-compounding continuous или annual (по умолчанию continuous)
   --deal-id LIST        считать только эти сделки
   --out FILE            CSV с потоками (по умолчанию stdout)
@@ -34,7 +39,10 @@ cfcalc — расчёт и дисконтирование денежных по�
 struct Args {
     deals: PathBuf,
     indicators: Vec<(String, PathBuf)>,
-    discount_curve: PathBuf,
+    discount_curve: Option<PathBuf>,
+    curve_db: Option<PathBuf>,
+    curve_type: String,
+    scenario: String,
     compounding: Compounding,
     deal_ids: Option<HashSet<i64>>,
     out: Option<PathBuf>,
@@ -48,6 +56,9 @@ fn parse_args() -> Result<Args, String> {
     let mut deals = PathBuf::from("data/deals.csv");
     let mut indicators = Vec::new();
     let mut discount_curve = None;
+    let mut curve_db = None;
+    let mut curve_type = String::from("G_CURVE");
+    let mut scenario = String::from("BASE");
     let mut compounding = Compounding::Continuous;
     let mut deal_ids = None;
     let mut out = None;
@@ -74,6 +85,9 @@ fn parse_args() -> Result<Args, String> {
                 indicators.push((code.to_string(), path.into()));
             }
             "--discount-curve" => discount_curve = Some(val("--discount-curve")?.into()),
+            "--curve-db" => curve_db = Some(val("--curve-db")?.into()),
+            "--curve-type" => curve_type = val("--curve-type")?,
+            "--scenario" => scenario = val("--scenario")?,
             "--discount-compounding" => {
                 compounding = Compounding::parse(&val("--discount-compounding")?)
                     .map_err(|e| e.to_string())?
@@ -107,12 +121,18 @@ fn parse_args() -> Result<Args, String> {
     if indicators.is_empty() {
         indicators.push(("CBKEY1M".into(), "data/cbkey1m.csv".into()));
     }
-    let discount_curve =
-        discount_curve.ok_or_else(|| format!("--discount-curve is required\n\n{USAGE}"))?;
+    if discount_curve.is_some() == curve_db.is_some() {
+        return Err(format!(
+            "specify exactly one of --discount-curve or --curve-db\n\n{USAGE}"
+        ));
+    }
     Ok(Args {
         deals,
         indicators,
         discount_curve,
+        curve_db,
+        curve_type,
+        scenario,
         compounding,
         deal_ids,
         out,
@@ -141,8 +161,12 @@ fn run() -> Result<(), String> {
             .load_percent_csv(code, path)
             .map_err(|e| e.to_string())?;
     }
-    let curves = CurveSet::load_percent_csv(&args.discount_curve, args.compounding)
-        .map_err(|e| e.to_string())?;
+    let curves = match (&args.discount_curve, &args.curve_db) {
+        (Some(path), None) => CurveSet::load_percent_csv(path, args.compounding),
+        (None, Some(path)) => CurveStore::open(path).and_then(|store| store.load_curve_set()),
+        _ => unreachable!(),
+    }
+    .map_err(|e| e.to_string())?;
 
     let mut output = output_writer(&args.out)?;
     output
@@ -191,7 +215,12 @@ fn run() -> Result<(), String> {
                     continue;
                 }
             };
-            let curve = match curves.curve_on(&deal.currency, deal.report_date) {
+            let curve = match curves.curve_for(
+                &args.curve_type,
+                &deal.currency,
+                deal.report_date,
+                &args.scenario,
+            ) {
                 Ok(curve) => curve,
                 Err(error) => {
                     errors += 1;

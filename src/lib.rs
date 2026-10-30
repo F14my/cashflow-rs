@@ -1,4 +1,5 @@
 pub mod cashflow;
+pub mod curve_store;
 pub mod curves;
 pub mod dates;
 pub mod discounting;

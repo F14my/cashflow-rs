@@ -65,12 +65,52 @@ cargo run --release -- \
   --summary out/summary.csv
 ```
 
-`--discount-curve` обязателен. Основные дополнительные параметры:
+Нужно указать ровно один источник кривых: `--discount-curve` или `--curve-db`. Основные дополнительные параметры:
 
 - `--deal-id 1,16,29` — ограничить набор сделок;
 - `--threads N` — число рабочих потоков;
 - `--chunk-size N` — размер чанка, по умолчанию 10 000;
 - `--act-act-as-365` — режим совместимости с эталонным Excel.
+
+## SQLite-хранилище и история загрузок
+
+Для демонстрации второго спринта предусмотрен `curve_admin`. Он создаёт таблицы `curve_sets`, `curve_points` и `curve_load_runs`. В узлах сохраняются zero rate и рассчитанный discount factor. Набор кривых идентифицируется типом, датой, валютой и сценарием.
+
+```bash
+cargo run --release --bin curve_admin -- init --db out/curves.db
+
+cargo run --release --bin curve_admin -- import \
+  --db out/curves.db \
+  --file data/demo_curves.csv \
+  --mode manual \
+  --source DEMO_FILE \
+  --requested-date 2022-08-31
+
+cargo run --release --bin curve_admin -- history --db out/curves.db
+cargo run --release --bin curve_admin -- curves --db out/curves.db
+```
+
+Режим импорта может быть `manual` или `automatic`; оба записываются в историю вместе со статусом, временем, количеством кривых и точек и сообщением об ошибке. Повторный импорт того же набора обновляет его атомарно, а не создаёт дубликаты.
+
+Расчёт из базы:
+
+```bash
+cargo run --release --bin cfcalc -- \
+  --deals data/deals.csv \
+  --curve-db out/curves.db \
+  --curve-type G_CURVE \
+  --scenario BASE \
+  --out out/cashflows.csv \
+  --summary out/summary.csv
+```
+
+Полный сценарий защиты запускается одной командой:
+
+```bash
+./scripts/demo_defense.sh
+```
+
+Файл `data/demo_curves.csv` содержит синтетические данные только для демонстрации механики. Его значения нельзя использовать как рыночные.
 
 Выход с потоками содержит исходные суммы, фактическую дату кривой, время, zero rate, discount factor и дисконтированные суммы. Summary содержит `principal`, `interest`, `total_cf`, `pv_principal`, `pv_interest` и `npv`.
 
