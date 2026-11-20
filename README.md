@@ -2,6 +2,61 @@
 
 Калькулятор строит будущие платежи по основному долгу и процентам, а затем дисконтирует их по внешней бескупонной кривой. Расчёт выполняется отдельно по каждой сделке, но вход читается чанками, сделки внутри чанка считаются параллельно, а результат сразу записывается в CSV.
 
+## Архитектура
+
+Код разложен по слоям чистой архитектуры, зависимости направлены внутрь:
+
+```text
+src/
+  domain/          модель сделки, графики, ставки, кривые, дисконтирование — чистые расчёты без I/O
+  application/     use case оценки портфеля по сценариям (ValuationService) и порты (DiscountCurves)
+  infrastructure/  адаптеры: CSV сделок/кривых/индикаторов, SQLite-хранилище кривых
+  interfaces/http/ HTTP API на axum: DTO и роутер
+  main.rs          CLI cfcalc
+  bin/cfcalc_api.rs  HTTP-сервер
+  bin/curve_admin.rs администрирование SQLite-хранилища
+```
+
+График платежей сделки строится один раз и дисконтируется по каждой кривой сценария, так что
+оценка N сценариев не перестраивает потоки. Сделки считаются параллельно.
+
+## HTTP API
+
+```bash
+cargo run --release --bin cfcalc-api          # слушает 0.0.0.0:8080
+```
+
+| Метод | Путь | Назначение |
+| --- | --- | --- |
+| GET | `/api/v1/health` | живость процесса |
+| POST | `/api/v1/valuations` | потоки, PV и NPV портфеля по набору сценарных кривых |
+
+Тело `POST /api/v1/valuations`:
+
+```json
+{
+  "deals": [{"report_dttm": "2022-08-31", "deal_id": 1, "discriminator": "ANN", "...": "колонки deals.csv"}],
+  "curves": [
+    {"scenario": "BASE", "curve_date": "2022-08-31", "currency": "RUB", "compounding": "continuous",
+     "points": [{"tenor_days": 30, "zero_rate_percent": 8.1}, {"tenor_days": 365, "zero_rate_percent": 8.6}]},
+    {"scenario": "PARALLEL_UP", "curve_date": "2022-08-31", "currency": "RUB",
+     "points": [{"tenor_days": 30, "zero_rate_percent": 12.1}]}
+  ],
+  "scenarios": ["BASE", "PARALLEL_UP"],
+  "indicators": [{"code": "CBKEY1M", "points": [{"effective_date": "2022-07-25", "rate_percent": 8}]}],
+  "act_act_as_365": false,
+  "include_cashflows": false
+}
+```
+
+Ответ содержит итоги по сценариям (`scenarios[].total.npv`) и по сделкам
+(`deals[].scenarios[].summary`, при `include_cashflows` — ещё и потоки). Ошибка отдельной сделки
+не валит запрос: она возвращается в `deals[].scenarios[].error` и учитывается в `failed`.
+Некорректный запрос — `422 {"code":"validation_error","message":...}`.
+
+Переменные окружения сервера: `CFCALC_ADDR`, `CFCALC_INDICATORS` (`CODE=FILE[,CODE=FILE]`),
+`CFCALC_THREADS`. Образ собирается `docker build -t cashflow-rs .`.
+
 ## Денежный поток
 
 Поддерживаются схемы погашения `SIMPLE`, `RGM` и `ANN`, явные графики погашения, фиксированные и плавающие ставки, основная и дополнительная процентные ноги, `ACT/365` и `ACT/ACT ISDA`.

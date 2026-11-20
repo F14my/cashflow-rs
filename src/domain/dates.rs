@@ -1,4 +1,4 @@
-use crate::error::{bail, Error, Result};
+use crate::domain::error::{bail, Error, Result};
 use chrono::{Datelike, Days, Months, NaiveDate};
 
 pub type Date = NaiveDate;

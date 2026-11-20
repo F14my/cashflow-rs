@@ -30,6 +30,6 @@ impl From<std::io::Error> for Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 macro_rules! bail {
-    ($($arg:tt)*) => { return Err($crate::error::Error::new(format!($($arg)*))) };
+    ($($arg:tt)*) => { return Err($crate::domain::error::Error::new(format!($($arg)*))) };
 }
 pub(crate) use bail;

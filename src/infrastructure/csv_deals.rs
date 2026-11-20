@@ -1,6 +1,6 @@
-use crate::dates::{parse_date, Date, DayCount, Period, ScheduleRule};
-use crate::error::{bail, Error, Result};
-use crate::model::*;
+use crate::domain::dates::{parse_date, Date, DayCount, Period, ScheduleRule};
+use crate::domain::error::{bail, Error, Result};
+use crate::domain::model::*;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::Path;
@@ -299,4 +299,31 @@ pub fn for_each_deal_chunk(
         consume(deals)?;
     }
     Ok(())
+}
+
+/// Parses deals that arrive as in-memory records (for example from an HTTP
+/// request) with the same column semantics as the CSV file: empty cells are
+/// absent values, the header names the columns.
+pub fn parse_deal_records(columns: &[String], rows: &[Vec<String>]) -> Result<Vec<Deal>> {
+    let headers = csv::StringRecord::from(columns.iter().map(|c| c.trim()).collect::<Vec<_>>());
+    let mut seen = HashSet::new();
+    let mut deals = Vec::with_capacity(rows.len());
+    for (index, values) in rows.iter().enumerate() {
+        if values.len() != columns.len() {
+            bail!(
+                "record {index}: expected {} values, got {}",
+                columns.len(),
+                values.len()
+            );
+        }
+        let record = csv::StringRecord::from(values.iter().map(|v| v.trim()).collect::<Vec<_>>());
+        let row: DealRow = record
+            .deserialize(Some(&headers))
+            .map_err(|e| Error::new(format!("record {index}: {e}")))?;
+        if !seen.insert(row.deal_id) {
+            bail!("duplicate deal_id value: {}", row.deal_id);
+        }
+        deals.push(to_deal(&row).map_err(|e| e.context(format!("deal_id={}", row.deal_id)))?);
+    }
+    Ok(deals)
 }

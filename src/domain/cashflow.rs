@@ -1,9 +1,9 @@
-use crate::dates::{Date, DayCount, Period};
-use crate::error::Result;
-use crate::indicators::IndicatorSource;
-use crate::model::{CashFlow, Deal, RateSpec};
-use crate::principal::build_principal_schedule;
-use crate::rates::RateEngine;
+use crate::domain::dates::{Date, DayCount, Period};
+use crate::domain::error::Result;
+use crate::domain::indicators::IndicatorSource;
+use crate::domain::model::{CashFlow, Deal, RateSpec};
+use crate::domain::principal::build_principal_schedule;
+use crate::domain::rates::RateEngine;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -20,7 +20,7 @@ impl CalcConfig {
     }
 }
 
-fn has_period(rule: &Option<crate::dates::ScheduleRule>) -> bool {
+fn has_period(rule: &Option<crate::domain::dates::ScheduleRule>) -> bool {
     matches!(
         rule.as_ref().and_then(|r| r.period),
         Some(Period::Months(_)) | Some(Period::Days(_)) | Some(Period::EndDate)

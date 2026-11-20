@@ -1,8 +1,8 @@
-use crate::cashflow::main_accrual_start;
-use crate::dates::{Date, Period};
-use crate::error::{bail, Result};
-use crate::model::{Deal, Discriminator, PrincipalPayment};
-use crate::rates::RateEngine;
+use crate::domain::cashflow::main_accrual_start;
+use crate::domain::dates::{Date, Period};
+use crate::domain::error::{bail, Result};
+use crate::domain::model::{Deal, Discriminator, PrincipalPayment};
+use crate::domain::rates::RateEngine;
 
 const EPS: f64 = 1e-9;
 

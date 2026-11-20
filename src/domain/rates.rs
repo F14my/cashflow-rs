@@ -1,7 +1,7 @@
-use crate::dates::{Date, DateExt, DayCount, Period};
-use crate::error::{bail, Result};
-use crate::indicators::IndicatorSource;
-use crate::model::{Deal, RateSpec, RateType};
+use crate::domain::dates::{Date, DateExt, DayCount, Period};
+use crate::domain::error::{bail, Result};
+use crate::domain::indicators::IndicatorSource;
+use crate::domain::model::{Deal, RateSpec, RateType};
 
 pub struct RateEngine<'a> {
     pub deal: &'a Deal,
@@ -188,9 +188,9 @@ impl<'a> RateEngine<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dates::ScheduleRule;
-    use crate::error::Result;
-    use crate::model::{DatedRate, Discriminator};
+    use crate::domain::dates::ScheduleRule;
+    use crate::domain::error::Result;
+    use crate::domain::model::{DatedRate, Discriminator};
     use chrono::NaiveDate;
 
     struct ConstantIndicator(f64);

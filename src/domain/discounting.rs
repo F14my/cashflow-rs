@@ -1,7 +1,7 @@
-use crate::curves::ZeroCurve;
-use crate::dates::{Date, DateExt};
-use crate::error::{bail, Result};
-use crate::model::{CashFlow, DiscountedCashFlow};
+use crate::domain::curves::ZeroCurve;
+use crate::domain::dates::{Date, DateExt};
+use crate::domain::error::{bail, Result};
+use crate::domain::model::{CashFlow, DiscountedCashFlow};
 
 pub fn discount_cashflow(
     cashflow: CashFlow,
@@ -41,7 +41,7 @@ pub fn discount_cashflow(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::curves::{Compounding, CurvePoint};
+    use crate::domain::curves::{Compounding, CurvePoint};
     use chrono::NaiveDate;
 
     #[test]

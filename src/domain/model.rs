@@ -1,5 +1,5 @@
-use crate::dates::{Date, DateExt, DayCount, ScheduleRule};
-use crate::error::{bail, Result};
+use crate::domain::dates::{Date, DateExt, DayCount, ScheduleRule};
+use crate::domain::error::{bail, Result};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RateType {
@@ -45,10 +45,9 @@ impl Lag {
     pub fn parse(s: &str) -> Result<Lag> {
         let s = s.trim();
         let (num, unit) = s.split_at(s.len().saturating_sub(1));
-        let n: i32 = num
-            .trim_start_matches('+')
-            .parse()
-            .map_err(|_| crate::error::Error::new(format!("unsupported indicator lag: {s:?}")))?;
+        let n: i32 = num.trim_start_matches('+').parse().map_err(|_| {
+            crate::domain::error::Error::new(format!("unsupported indicator lag: {s:?}"))
+        })?;
         match unit {
             "M" | "m" => Ok(Lag::Months(n)),
             "D" | "d" => Ok(Lag::Days(n)),
