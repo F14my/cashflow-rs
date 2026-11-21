@@ -21,7 +21,7 @@ cfcalc — расчёт и дисконтирование денежных по�
          [--curve-type NAME] [--scenario NAME] [--indicator CODE=FILE]...
          [--discount-compounding continuous|annual] [--deal-id 1,16,29]
          [--out FILE] [--summary FILE] [--threads N] [--chunk-size N]
-         [--act-act-as-365]
+         [--act-act-as-365] [--prepayment standard|CODE=CPR,...]
 
   --deals FILE          CSV сделок (`;`), по умолчанию data/deals.csv
   --indicator CODE=FILE история индикатора effective_date;rate_percent
@@ -37,6 +37,9 @@ cfcalc — расчёт и дисконтирование денежных по�
   --threads N           число потоков (по умолчанию — все ядра)
   --chunk-size N        сделок в одном чанке (по умолчанию 10000)
   --act-act-as-365      считать ACT/ACT как ACT/365 (как в эталонном Excel)
+  --prepayment SPEC     досрочные погашения по behavior_model_cd: standard — ставки CPR
+                        по умолчанию, CODE=CPR[,CODE=CPR] — поверх них
+                        (например PREPAYMENT_MORTGAGE=0.1)
 ";
 
 struct Args {
@@ -115,6 +118,13 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|_| "bad --chunk-size")?
             }
             "--act-act-as-365" => cfg.act_act_as_365 = true,
+            "--prepayment" => {
+                let spec = val("--prepayment")?;
+                let spec = if spec.eq_ignore_ascii_case("standard") { String::new() } else { spec };
+                let policy = cashflow::domain::prepayment::PrepaymentPolicy::parse(&spec)
+                    .map_err(|e| e.to_string())?;
+                cfg.prepayment = Some(std::sync::Arc::new(policy));
+            }
             other => return Err(format!("unknown argument {other:?}\n\n{USAGE}")),
         }
     }
@@ -171,7 +181,7 @@ fn run() -> Result<(), String> {
 
     let mut output = output_writer(&args.out)?;
     output
-        .write_all(b"deal_id;cashflow_date;currency;interest_period_start;interest_period_end;principal_cf;interest_cf;total_cf;balance_before;balance_after;curve_date;discount_time;zero_rate;discount_factor;discounted_principal_cf;discounted_interest_cf;discounted_total_cf\n")
+        .write_all(b"deal_id;cashflow_date;currency;interest_period_start;interest_period_end;principal_cf;interest_cf;total_cf;balance_before;balance_after;curve_date;discount_time;zero_rate;discount_factor;discounted_principal_cf;discounted_interest_cf;discounted_total_cf;subsidy_cf;prepayment_cf;discounted_subsidy_cf;discounted_prepayment_cf\n")
         .map_err(|e| e.to_string())?;
     let mut summary_output = args
         .summary
@@ -207,7 +217,7 @@ fn run() -> Result<(), String> {
         }
         deal_count += deals.len();
         let scenarios = [args.scenario.clone()];
-        let service = ValuationService::new(&indicators, &curves, args.cfg, args.threads);
+        let service = ValuationService::new(&indicators, &curves, args.cfg.clone(), args.threads);
         for valuation in service.value(&deals, &args.curve_type, &scenarios) {
             let discounted = match valuation
                 .scenarios
@@ -292,7 +302,7 @@ fn write_cashflow(line: &mut String, discounted: &cashflow::DiscountedCashFlow) 
     let cf = &discounted.cashflow;
     let _ = writeln!(
         line,
-        "{};{};{};{};{};{:.2};{:.2};{:.2};{:.2};{:.2};{};{:.10};{:.10};{:.12};{:.2};{:.2};{:.2}",
+        "{};{};{};{};{};{:.2};{:.2};{:.2};{:.2};{:.2};{};{:.10};{:.10};{:.12};{:.2};{:.2};{:.2};{:.2};{:.2};{:.2};{:.2}",
         cf.deal_id,
         cf.cashflow_date,
         cf.currency,
@@ -309,7 +319,11 @@ fn write_cashflow(line: &mut String, discounted: &cashflow::DiscountedCashFlow) 
         discounted.discount_factor,
         discounted.discounted_principal_cf,
         discounted.discounted_interest_cf,
-        discounted.discounted_total_cf
+        discounted.discounted_total_cf,
+        cf.subsidy_cf,
+        cf.prepayment_cf,
+        discounted.discounted_subsidy_cf,
+        discounted.discounted_prepayment_cf
     );
 }
 

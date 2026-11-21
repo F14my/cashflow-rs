@@ -2,6 +2,23 @@ use crate::application::valuation::{DealValuation, ScenarioTotal};
 use crate::domain::valuation::DealSummary;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
+
+/// Behavioural prepayment of a request or portfolio. Absent: the server default
+/// (`CFCALC_PREPAYMENT`). `enabled: false` keeps contractual schedules; `rates` sets the
+/// annual CPR of behaviour model codes on top of the standard ones.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrepaymentDto {
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub rates: BTreeMap<String, f64>,
+}
+
+fn yes() -> bool {
+    true
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -9,7 +26,14 @@ pub struct ValuationRequest {
     /// Deal records with the same columns as `deals.csv`. Numbers or strings; null/"" are absent.
     pub deals: Vec<Map<String, Value>>,
     /// Discount curves, one per scenario (several dates per scenario are allowed).
+    #[serde(default)]
     pub curves: Vec<CurveDto>,
+    /// Take curves from the curve service instead: base and IRRBB scenarios on every
+    /// report date of the deals (`CFCALC_CURVES_URL`).
+    #[serde(default)]
+    pub curves_from_service: bool,
+    #[serde(default)]
+    pub prepayment: Option<PrepaymentDto>,
     /// Scenarios to value; defaults to every scenario present in `curves`, in order.
     #[serde(default)]
     pub scenarios: Option<Vec<String>>,
@@ -64,9 +88,13 @@ pub struct IndicatorPointDto {
 pub struct SummaryDto {
     pub principal: f64,
     pub interest: f64,
+    pub subsidy: f64,
+    pub prepayment: f64,
     pub total_cf: f64,
     pub pv_principal: f64,
     pub pv_interest: f64,
+    pub pv_subsidy: f64,
+    pub pv_prepayment: f64,
     pub npv: f64,
 }
 
@@ -75,9 +103,13 @@ impl From<&DealSummary> for SummaryDto {
         Self {
             principal: s.principal,
             interest: s.interest,
+            subsidy: s.subsidy,
+            prepayment: s.prepayment,
             total_cf: s.total_cf,
             pv_principal: s.pv_principal,
             pv_interest: s.pv_interest,
+            pv_subsidy: s.pv_subsidy,
+            pv_prepayment: s.pv_prepayment,
             npv: s.npv,
         }
     }
@@ -88,6 +120,8 @@ pub struct CashflowDto {
     pub date: String,
     pub principal: f64,
     pub interest: f64,
+    pub subsidy: f64,
+    pub prepayment: f64,
     pub total: f64,
     pub balance_before: f64,
     pub balance_after: f64,
@@ -97,6 +131,8 @@ pub struct CashflowDto {
     pub discount_factor: f64,
     pub pv_principal: f64,
     pub pv_interest: f64,
+    pub pv_subsidy: f64,
+    pub pv_prepayment: f64,
     pub pv: f64,
 }
 
@@ -163,6 +199,8 @@ pub fn deal_dto(v: &DealValuation, scenarios: &[String], include_cashflows: bool
                                 date: c.cashflow.cashflow_date.to_string(),
                                 principal: c.cashflow.principal_cf,
                                 interest: c.cashflow.interest_cf,
+                                subsidy: c.cashflow.subsidy_cf,
+                                prepayment: c.cashflow.prepayment_cf,
                                 total: c.cashflow.total(),
                                 balance_before: c.cashflow.balance_before,
                                 balance_after: c.cashflow.balance_after,
@@ -172,6 +210,8 @@ pub fn deal_dto(v: &DealValuation, scenarios: &[String], include_cashflows: bool
                                 discount_factor: c.discount_factor,
                                 pv_principal: c.discounted_principal_cf,
                                 pv_interest: c.discounted_interest_cf,
+                                pv_subsidy: c.discounted_subsidy_cf,
+                                pv_prepayment: c.discounted_prepayment_cf,
                                 pv: c.discounted_total_cf,
                             })
                             .collect()

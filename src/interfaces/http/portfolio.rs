@@ -1,18 +1,20 @@
 //! Portfolio endpoints: upload deals in JSON batches once, then value them many times.
 //!
 //! ```text
-//! POST   /api/v1/portfolios                     {indicators?, act_act_as_365?}      -> 201 {id}
+//! POST   /api/v1/portfolios                     {indicators?, act_act_as_365?, prepayment?} -> 201 {id}
 //! POST   /api/v1/portfolios/{id}/deals          {deals: [...], currency?}           -> upload report
 //! POST   /api/v1/portfolios/{id}/seal           {dates: [...]}                      -> base schedules, balances
 //! POST   /api/v1/portfolios/{id}/valuations     {as_of, curve_sets, scenarios?, sample_ids?, only_ids?, keep?}
+//!        (a curve set may give `curve_date` instead of `curves`: the calculator then takes
+//!        base and scenario curves of that date from the curve service)
 //! GET    /api/v1/portfolios/{id}/movers?from=&to=&n=
 //! GET    /api/v1/portfolios/{id}
 //! DELETE /api/v1/portfolios/{id}
 //! ```
 
-use super::dto::{records_to_table, CurvePointDto, IndicatorDto};
-use super::router::{invalid, merged_indicators, ApiError, AppState};
-use crate::application::portfolio::{CurveSetTables, DealError, Portfolio, ValuationQuery};
+use super::dto::{records_to_table, CurvePointDto, IndicatorDto, PrepaymentDto};
+use super::router::{curve_service, invalid, merged_indicators, prepayment_policy, upstream, ApiError, AppState};
+use crate::application::portfolio::{BehaviourStats, CurveSetTables, DealError, Portfolio, ValuationQuery};
 use crate::domain::cashflow::CalcConfig;
 use crate::domain::curves::{Compounding, CurvePoint, ZeroCurve};
 use crate::domain::dates::{parse_date, Date};
@@ -36,6 +38,8 @@ pub struct CreatePortfolioRequest {
     pub indicators: Vec<IndicatorDto>,
     #[serde(default)]
     pub act_act_as_365: bool,
+    #[serde(default)]
+    pub prepayment: Option<PrepaymentDto>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,7 +79,11 @@ fn rub() -> String {
 #[serde(deny_unknown_fields)]
 pub struct CurveSetDto {
     pub name: String,
+    #[serde(default)]
     pub curves: Vec<SetCurveDto>,
+    /// Instead of `curves`: take base and IRRBB scenario curves of this date from the curve service.
+    #[serde(default)]
+    pub curve_date: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -173,7 +181,10 @@ pub async fn create(
 ) -> std::result::Result<impl IntoResponse, ApiError> {
     let req = body.map(|Json(b)| b).unwrap_or_default();
     let indicators = merged_indicators(&state, &req.indicators)?;
-    let cfg = CalcConfig { act_act_as_365: req.act_act_as_365 };
+    let cfg = CalcConfig {
+        act_act_as_365: req.act_act_as_365,
+        prepayment: prepayment_policy(&state, req.prepayment.as_ref())?,
+    };
     let p = state.portfolios.create(cfg, indicators, state.threads);
     Ok((StatusCode::CREATED, Json(serde_json::json!({"id": p.id}))))
 }
@@ -183,7 +194,12 @@ pub async fn info(
     Path(id): Path<String>,
 ) -> std::result::Result<Json<Value>, ApiError> {
     let p = find(&state, &id)?;
-    Ok(Json(serde_json::json!({"id": p.id, "deals": p.deal_count(), "sealed": p.is_sealed()})))
+    Ok(Json(serde_json::json!({
+        "id": p.id,
+        "deals": p.deal_count(),
+        "sealed": p.is_sealed(),
+        "behaviour": behaviour_json(&p.behaviour()),
+    })))
 }
 
 pub async fn remove(State(state): State<AppState>, Path(id): Path<String>) -> StatusCode {
@@ -242,10 +258,49 @@ pub async fn seal(
             "report_dates": r.report_dates.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
             "rejected_total": r.rejected_total,
             "rejected": r.rejected.iter().map(RejectedDto::from).collect::<Vec<_>>(),
+            "behaviour": behaviour_json(&p.behaviour()),
             "elapsed_ms": r.elapsed.as_secs_f64() * 1e3,
         })))
     })
     .await
+}
+
+fn behaviour_json(b: &BehaviourStats) -> Value {
+    serde_json::json!({
+        "prepayment": {
+            "enabled": b.prepayment_enabled,
+            "deals": b.prepaying,
+            "by_model": b.by_model.iter().map(|(k, (n, cpr))| (k.clone(), serde_json::json!({"deals": n, "cpr": cpr}))).collect::<serde_json::Map<_, _>>(),
+            "unknown_models": b.unknown_models,
+        },
+        "subsidy": {"deals": b.subsidised, "principal": b.subsidised_principal},
+    })
+}
+
+/// Replaces `curve_date` sets by the curve service's curves of that date.
+fn resolve_service_curves(state: &AppState, req: &mut PortfolioValuationRequest) -> std::result::Result<(), ApiError> {
+    for set in &mut req.curve_sets {
+        let Some(date) = set.curve_date.take() else { continue };
+        if !set.curves.is_empty() {
+            return Err(invalid(Error::new(format!("curve set {:?}: pass either curves or curve_date", set.name))));
+        }
+        parse_date(&date).map_err(invalid)?;
+        let (_, curves) = curve_service(state)?.curves(&date).map_err(upstream)?;
+        set.curves = curves
+            .into_iter()
+            .map(|c| SetCurveDto {
+                scenario: c.scenario,
+                currency: "RUB".into(),
+                compounding: Some("annual".into()),
+                points: c
+                    .points
+                    .into_iter()
+                    .map(|(tenor_days, zero_rate_percent)| CurvePointDto { tenor_days, zero_rate_percent })
+                    .collect(),
+            })
+            .collect();
+    }
+    Ok(())
 }
 
 fn scenario_list(req: &PortfolioValuationRequest) -> Vec<String> {
@@ -301,10 +356,11 @@ fn build_query(p: &Portfolio, req: PortfolioValuationRequest) -> Result<Valuatio
 pub async fn valuations(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(req): Json<PortfolioValuationRequest>,
+    Json(mut req): Json<PortfolioValuationRequest>,
 ) -> std::result::Result<Json<Value>, ApiError> {
     let p = find(&state, &id)?;
     blocking(move || {
+        resolve_service_curves(&state, &mut req)?;
         let q = build_query(&p, req).map_err(invalid)?;
         let out = p.value(&q).map_err(invalid)?;
         let scen = &q.scenarios;

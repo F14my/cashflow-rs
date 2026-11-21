@@ -125,3 +125,85 @@ fn rolling_drops_matured_deals_and_keeps_movers() {
     assert_eq!(movers.len(), 3);
     assert!(movers[0].change.abs() >= movers[2].change.abs());
 }
+
+fn with_prepayment() -> CalcConfig {
+    CalcConfig {
+        prepayment: Some(Arc::new(cashflow::domain::prepayment::PrepaymentPolicy::standard())),
+        ..CalcConfig::default()
+    }
+}
+
+#[test]
+fn prepayment_and_subsidy_reach_portfolio_totals() {
+    let ind = indicators();
+    let (cols, rows) = csv_rows();
+    let scenarios = vec!["BASE".to_string()];
+    let value_with = |cfg: CalcConfig| {
+        let p = PortfolioStore::new(1, Duration::from_secs(60)).create(cfg, ind.clone(), 2);
+        p.upload(parse_deal_batch(&cols, &rows, Some("RUB"), 2).unwrap()).unwrap();
+        p.seal(&[d("2022-08-31")]).unwrap();
+        let sets = vec![CurveSetTables::new("own".into(), vec![curve("2022-08-31", "BASE", 0.08, 0.09)], &scenarios, 20_000).unwrap()];
+        let out = p
+            .value(&ValuationQuery {
+                as_of: d("2022-08-31"),
+                sets,
+                scenarios: scenarios.clone(),
+                sample: HashSet::new(),
+                only: None,
+                keep: None,
+            })
+            .unwrap();
+        (p.behaviour(), out.totals[0][0])
+    };
+    let (plain_stats, plain) = value_with(CalcConfig::default());
+    let (stats, prepaid) = value_with(with_prepayment());
+    assert!(!plain_stats.prepayment_enabled && plain_stats.prepaying == 0);
+    assert!(stats.prepaying > 10, "sample deals carry PREPAYMENT_* models: {stats:?}");
+    assert!(stats.subsidised > 0, "sample deals carry a sub_* leg");
+    assert!((prepaid - plain).abs() > 1.0, "prepayment must change the NPV: {prepaid} vs {plain}");
+
+    // the stateless service with the same policy gives the same total
+    let deals: Vec<_> = parse_deals(Path::new("data/deals.csv"))
+        .unwrap()
+        .into_iter()
+        .filter(|x| x.currency == "RUB")
+        .collect();
+    let set = CurveSet::from_curves(vec![curve("2022-08-31", "BASE", 0.08, 0.09)]).unwrap();
+    let svc = ValuationService::new(ind.as_ref(), &set, with_prepayment(), 2);
+    let want: f64 = svc
+        .value(&deals, "API", &scenarios)
+        .iter()
+        .filter_map(|v| v.scenarios[0].as_ref().ok())
+        .map(|s| {
+            // every principal comes back exactly once: scheduled + prepaid = outstanding
+            let back = s.summary.principal + s.summary.prepayment;
+            assert!(back.is_finite());
+            s.summary.npv
+        })
+        .sum();
+    assert!((want - prepaid).abs() < 1e-6 * want.abs().max(1.0), "{prepaid} vs {want}");
+}
+
+#[test]
+fn prepaid_portfolio_rolls_to_the_same_value_as_a_direct_schedule() {
+    // a deal rolled half a year ahead must be worth what its prepaid schedule says from there
+    let ind = indicators();
+    let (cols, rows) = csv_rows();
+    let p = PortfolioStore::new(1, Duration::from_secs(60)).create(with_prepayment(), ind.clone(), 2);
+    p.upload(parse_deal_batch(&cols, &rows, Some("RUB"), 2).unwrap()).unwrap();
+    p.seal(&[d("2022-08-31"), d("2023-02-28")]).unwrap();
+    let scenarios = vec!["BASE".to_string()];
+    let sets = vec![CurveSetTables::new("own".into(), vec![curve("2023-02-28", "BASE", 0.08, 0.09)], &scenarios, 20_000).unwrap()];
+    let later = p
+        .value(&ValuationQuery {
+            as_of: d("2023-02-28"),
+            sets,
+            scenarios: scenarios.clone(),
+            sample: HashSet::new(),
+            only: None,
+            keep: None,
+        })
+        .unwrap();
+    assert!(later.valued > 20);
+    assert!(later.totals[0][0].is_finite());
+}

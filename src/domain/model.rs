@@ -121,8 +121,15 @@ pub struct CashFlow {
     pub currency: String,
     pub interest_period_start: Date,
     pub interest_period_end: Date,
+    /// Scheduled (contractual) principal.
     pub principal_cf: f64,
+    /// Interest paid by the client (main rate leg).
     pub interest_cf: f64,
+    /// Interest of the second rate leg (`sub_*` columns): the subsidy paid on top of the
+    /// client rate, e.g. state compensation on subsidised loans.
+    pub subsidy_cf: f64,
+    /// Behavioural prepayment of principal on this date (see `domain::prepayment`).
+    pub prepayment_cf: f64,
     pub balance_before: f64,
     pub balance_after: f64,
 }
@@ -136,11 +143,13 @@ pub struct DiscountedCashFlow {
     pub discount_factor: f64,
     pub discounted_principal_cf: f64,
     pub discounted_interest_cf: f64,
+    pub discounted_subsidy_cf: f64,
+    pub discounted_prepayment_cf: f64,
     pub discounted_total_cf: f64,
 }
 
 impl CashFlow {
     pub fn total(&self) -> f64 {
-        self.principal_cf + self.interest_cf
+        self.principal_cf + self.prepayment_cf + self.interest_cf + self.subsidy_cf
     }
 }

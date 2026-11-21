@@ -10,9 +10,13 @@ pub struct DealSummary {
     pub deal_id: i64,
     pub principal: f64,
     pub interest: f64,
+    pub subsidy: f64,
+    pub prepayment: f64,
     pub total_cf: f64,
     pub pv_principal: f64,
     pub pv_interest: f64,
+    pub pv_subsidy: f64,
+    pub pv_prepayment: f64,
     pub npv: f64,
 }
 
@@ -20,9 +24,13 @@ impl DealSummary {
     pub fn add(&mut self, other: &DealSummary) {
         self.principal += other.principal;
         self.interest += other.interest;
+        self.subsidy += other.subsidy;
+        self.prepayment += other.prepayment;
         self.total_cf += other.total_cf;
         self.pv_principal += other.pv_principal;
         self.pv_interest += other.pv_interest;
+        self.pv_subsidy += other.pv_subsidy;
+        self.pv_prepayment += other.pv_prepayment;
         self.npv += other.npv;
     }
 }
@@ -56,6 +64,8 @@ pub fn calculate_deal(
     for c in &cashflows {
         summary.principal += c.principal_cf;
         summary.interest += c.interest_cf;
+        summary.subsidy += c.subsidy_cf;
+        summary.prepayment += c.prepayment_cf;
         summary.total_cf += c.total();
     }
     Ok(DealResult {
@@ -78,6 +88,8 @@ pub fn discount_deal(
             .map_err(|e| e.context(format!("deal_id={}", deal.deal_id)))?;
         summary.pv_principal += d.discounted_principal_cf;
         summary.pv_interest += d.discounted_interest_cf;
+        summary.pv_subsidy += d.discounted_subsidy_cf;
+        summary.pv_prepayment += d.discounted_prepayment_cf;
         summary.npv += d.discounted_total_cf;
         cashflows.push(d);
     }
