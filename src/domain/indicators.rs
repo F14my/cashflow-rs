@@ -1,8 +1,6 @@
-use crate::dates::Date;
-use crate::error::{bail, Error, Result};
-use serde::Deserialize;
+use crate::domain::dates::Date;
+use crate::domain::error::{bail, Error, Result};
 use std::collections::HashMap;
-use std::path::Path;
 
 pub trait IndicatorSource: Sync {
     fn rate(&self, indicator: &str, fixing_date: Date, report_date: Date) -> Result<f64>;
@@ -28,26 +26,6 @@ impl IndicatorHistory {
         }
         self.series.insert(indicator.to_string(), points);
         Ok(())
-    }
-
-    pub fn load_percent_csv(&mut self, indicator: &str, path: &Path) -> Result<()> {
-        #[derive(Deserialize)]
-        struct Row {
-            effective_date: Date,
-            rate_percent: f64,
-        }
-        let err = |e: csv::Error| Error::new(format!("{}: {e}", path.display()));
-        let mut reader = csv::ReaderBuilder::new()
-            .delimiter(b';')
-            .trim(csv::Trim::All)
-            .from_path(path)
-            .map_err(err)?;
-        let mut points = Vec::new();
-        for row in reader.deserialize::<Row>() {
-            let row = row.map_err(err)?;
-            points.push((row.effective_date, row.rate_percent / 100.0));
-        }
-        self.insert(indicator, points)
     }
 
     pub fn value_on(&self, indicator: &str, date: Date) -> Result<f64> {

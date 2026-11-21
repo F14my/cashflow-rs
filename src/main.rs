@@ -1,9 +1,12 @@
-use cashflow::curve_store::CurveStore;
-use cashflow::curves::{Compounding, CurveSet};
-use cashflow::discounting::discount_cashflow;
-use cashflow::indicators::IndicatorHistory;
-use cashflow::parser::for_each_deal_chunk;
-use cashflow::{calculate_portfolio, CalcConfig, DealSummary};
+use cashflow::application::valuation::ValuationService;
+use cashflow::domain::cashflow::CalcConfig;
+use cashflow::domain::curves::Compounding;
+use cashflow::domain::indicators::IndicatorHistory;
+use cashflow::domain::valuation::DealSummary;
+use cashflow::infrastructure::csv_curves::load_curve_csv;
+use cashflow::infrastructure::csv_deals::for_each_deal_chunk;
+use cashflow::infrastructure::csv_indicators::load_indicator_csv;
+use cashflow::infrastructure::sqlite_curve_store::CurveStore;
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::io::{BufWriter, Write};
@@ -157,12 +160,10 @@ fn run() -> Result<(), String> {
     let started = Instant::now();
     let mut indicators = IndicatorHistory::new();
     for (code, path) in &args.indicators {
-        indicators
-            .load_percent_csv(code, path)
-            .map_err(|e| e.to_string())?;
+        load_indicator_csv(&mut indicators, code, path).map_err(|e| e.to_string())?;
     }
     let curves = match (&args.discount_curve, &args.curve_db) {
-        (Some(path), None) => CurveSet::load_percent_csv(path, args.compounding),
+        (Some(path), None) => load_curve_csv(path, args.compounding),
         (None, Some(path)) => CurveStore::open(path).and_then(|store| store.load_curve_set()),
         _ => unreachable!(),
     }
@@ -205,49 +206,26 @@ fn run() -> Result<(), String> {
             });
         }
         deal_count += deals.len();
-        let results = calculate_portfolio(&deals, &indicators, &args.cfg, args.threads);
-        for (result, deal) in results.into_iter().zip(&deals) {
-            let result = match result {
-                Ok(result) => result,
+        let scenarios = [args.scenario.clone()];
+        let service = ValuationService::new(&indicators, &curves, args.cfg, args.threads);
+        for valuation in service.value(&deals, &args.curve_type, &scenarios) {
+            let discounted = match valuation
+                .scenarios
+                .into_iter()
+                .next()
+                .expect("one scenario")
+            {
+                Ok(value) => value,
                 Err(error) => {
                     errors += 1;
                     eprintln!("ERROR {error}");
                     continue;
                 }
             };
-            let curve = match curves.curve_for(
-                &args.curve_type,
-                &deal.currency,
-                deal.report_date,
-                &args.scenario,
-            ) {
-                Ok(curve) => curve,
-                Err(error) => {
-                    errors += 1;
-                    eprintln!("ERROR deal_id={}: {error}", deal.deal_id);
-                    continue;
-                }
-            };
-            let discounted = match result
-                .cashflows
-                .into_iter()
-                .map(|cashflow| discount_cashflow(cashflow, deal.report_date, curve))
-                .collect::<cashflow::Result<Vec<_>>>()
-            {
-                Ok(value) => value,
-                Err(error) => {
-                    errors += 1;
-                    eprintln!("ERROR deal_id={}: {error}", deal.deal_id);
-                    continue;
-                }
-            };
-            let mut summary = result.summary;
-            for discounted_cf in discounted {
-                summary.pv_principal += discounted_cf.discounted_principal_cf;
-                summary.pv_interest += discounted_cf.discounted_interest_cf;
-                summary.npv += discounted_cf.discounted_total_cf;
+            let summary = discounted.summary;
+            for discounted_cf in &discounted.cashflows {
                 line.clear();
-                write_cashflow(&mut line, &discounted_cf);
+                write_cashflow(&mut line, discounted_cf);
                 output
                     .write_all(line.as_bytes())
                     .map_err(|e| cashflow::Error::new(e.to_string()))?;

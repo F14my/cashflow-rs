@@ -1,6 +1,6 @@
-use crate::curves::{Compounding, CurvePoint, CurveProvider, CurveSet, ZeroCurve};
-use crate::dates::parse_date;
-use crate::error::{Error, Result};
+use crate::domain::curves::{Compounding, CurvePoint, CurveProvider, CurveSet, ZeroCurve};
+use crate::domain::dates::parse_date;
+use crate::domain::error::{Error, Result};
 use rusqlite::{params, Connection};
 use std::path::Path;
 
@@ -115,7 +115,7 @@ impl CurveStore {
             .map_err(sql_error)?;
 
         let result: Result<(i64, i64)> = (|| {
-            let set = CurveSet::load_percent_csv(path, compounding)?;
+            let set = crate::infrastructure::csv_curves::load_curve_csv(path, compounding)?;
             let transaction = self.connection.transaction().map_err(sql_error)?;
             let mut curve_count = 0_i64;
             let mut point_count = 0_i64;
@@ -314,7 +314,7 @@ impl CurveProvider for CurveStore {
         &self,
         curve_type: &str,
         currency: &str,
-        report_date: crate::dates::Date,
+        report_date: crate::domain::dates::Date,
         scenario: &str,
     ) -> Result<ZeroCurve> {
         self.load_curve_set()?
