@@ -1,7 +1,8 @@
-//! Moving a deal to a later report date along its own contractual schedule.
+//! Moving a deal to a later report date along its own schedule.
 //!
-//! No new business and no behavioural prepayments: the outstanding principal on the
-//! target date is the balance after the last scheduled payment on or before it.
+//! No new business. The outstanding principal on the target date is the balance after the
+//! last scheduled payment on or before it; with behavioural prepayment (see
+//! `domain::prepayment`) that balance already excludes the principal prepaid by then.
 
 use crate::domain::dates::Date;
 use crate::domain::model::{CashFlow, Deal};
@@ -22,7 +23,10 @@ pub fn balance_on(flows: &[CashFlow], outstanding: f64, on: Date) -> f64 {
 
 /// State of `deal` on `to`, given its scheduled balance on that date.
 /// Returns `None` when the deal has matured or is fully repaid by then.
-pub fn roll_forward(deal: &Deal, balance: f64, to: Date) -> Option<Deal> {
+///
+/// `prepaid` says the balance includes behavioural prepayment: an explicit principal
+/// schedule is then scaled down to that balance (prepayment lowers every later payment).
+pub fn roll_forward(deal: &Deal, balance: f64, to: Date, prepaid: bool) -> Option<Deal> {
     if deal.maturity_date <= to {
         return None;
     }
@@ -41,7 +45,16 @@ pub fn roll_forward(deal: &Deal, balance: f64, to: Date) -> Option<Deal> {
         if rolled.principal_payments.is_empty() {
             return None;
         }
-        rolled.outstanding_principal = rolled.principal_payments.iter().map(|p| p.amount).sum();
+        let scheduled: f64 = rolled.principal_payments.iter().map(|p| p.amount).sum();
+        if prepaid && scheduled > balance && scheduled > 0.0 {
+            let share = balance / scheduled;
+            for p in &mut rolled.principal_payments {
+                p.amount *= share;
+            }
+            rolled.outstanding_principal = balance;
+        } else {
+            rolled.outstanding_principal = scheduled;
+        }
     }
     rolled.interest_payment_dates.retain(|d| *d > to);
     Some(rolled)
@@ -101,7 +114,7 @@ mod tests {
 
     #[test]
     fn rolls_balance_and_drops_past_dates() {
-        let r = roll_forward(&deal(), 600.0, d(2022, 9, 30)).unwrap();
+        let r = roll_forward(&deal(), 600.0, d(2022, 9, 30), false).unwrap();
         assert_eq!(r.report_date, d(2022, 9, 30));
         assert_eq!(r.outstanding_principal, 600.0);
         assert_eq!(r.accrued_interest, None);
@@ -110,8 +123,8 @@ mod tests {
 
     #[test]
     fn matured_or_repaid_deals_disappear() {
-        assert!(roll_forward(&deal(), 600.0, d(2023, 8, 31)).is_none());
-        assert!(roll_forward(&deal(), 0.0, d(2022, 9, 30)).is_none());
+        assert!(roll_forward(&deal(), 600.0, d(2023, 8, 31), false).is_none());
+        assert!(roll_forward(&deal(), 0.0, d(2022, 9, 30), false).is_none());
     }
 
     #[test]
@@ -121,8 +134,21 @@ mod tests {
             PrincipalPayment { date: d(2022, 9, 30), amount: 400.0 },
             PrincipalPayment { date: d(2022, 12, 31), amount: 600.0 },
         ];
-        let r = roll_forward(&x, 999.0, d(2022, 10, 15)).unwrap();
+        let r = roll_forward(&x, 999.0, d(2022, 10, 15), false).unwrap();
         assert_eq!(r.outstanding_principal, 600.0);
         assert_eq!(r.principal_payments.len(), 1);
+    }
+
+    #[test]
+    fn prepaid_explicit_schedule_is_scaled_to_the_balance() {
+        let mut x = deal();
+        x.principal_payments = vec![
+            PrincipalPayment { date: d(2022, 12, 31), amount: 300.0 },
+            PrincipalPayment { date: d(2023, 3, 31), amount: 300.0 },
+        ];
+        let r = roll_forward(&x, 450.0, d(2022, 10, 15), true).unwrap();
+        assert_eq!(r.outstanding_principal, 450.0);
+        assert_eq!(r.principal_payments[0].amount, 225.0);
+        assert_eq!(r.principal_payments[1].amount, 225.0);
     }
 }

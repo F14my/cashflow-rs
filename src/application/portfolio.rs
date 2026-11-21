@@ -157,6 +157,20 @@ pub struct ValuationOutcome {
     pub elapsed: Duration,
 }
 
+/// How many deals prepay (by behaviour model) and how many carry a subsidy leg.
+#[derive(Clone, Debug, Default)]
+pub struct BehaviourStats {
+    pub prepayment_enabled: bool,
+    /// Deals with a behaviour model the policy prepays.
+    pub prepaying: usize,
+    /// `code -> (deals, annual CPR)`.
+    pub by_model: std::collections::BTreeMap<String, (usize, f64)>,
+    /// Deals whose model code the policy does not know (kept contractual).
+    pub unknown_models: std::collections::BTreeMap<String, usize>,
+    pub subsidised: usize,
+    pub subsidised_principal: f64,
+}
+
 #[derive(Clone, Debug)]
 pub struct Mover {
     pub deal_id: i64,
@@ -210,6 +224,30 @@ impl Portfolio {
 
     pub fn threads(&self) -> usize {
         self.threads
+    }
+
+    pub fn behaviour(&self) -> BehaviourStats {
+        let inner = self.inner.read().expect("portfolio lock");
+        let mut s = BehaviourStats { prepayment_enabled: self.cfg.prepayment.is_some(), ..Default::default() };
+        for d in &inner.deals {
+            if d.sub_rate_spec.is_some() {
+                s.subsidised += 1;
+                s.subsidised_principal += d.outstanding_principal;
+            }
+            let Some(code) = d.behavior_model.as_deref().map(|c| c.trim().to_ascii_uppercase()) else {
+                continue;
+            };
+            match self.cfg.cpr(d) {
+                Some(cpr) => {
+                    s.prepaying += 1;
+                    let e = s.by_model.entry(code).or_insert((0, cpr));
+                    e.0 += 1;
+                }
+                None if s.prepayment_enabled => *s.unknown_models.entry(code).or_insert(0) += 1,
+                None => {}
+            }
+        }
+        s
     }
 
     /// Adds one parsed batch. Duplicate ids and unparsable rows are rejected individually.
@@ -453,7 +491,7 @@ impl Portfolio {
                     }
                     deal
                 } else {
-                    match roll_forward(deal, balances[i], q.as_of) {
+                    match roll_forward(deal, balances[i], q.as_of, self.cfg.cpr(deal).is_some()) {
                         Some(r) => {
                             rolled = r;
                             &rolled

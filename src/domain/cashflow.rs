@@ -2,16 +2,25 @@ use crate::domain::dates::{Date, DayCount, Period};
 use crate::domain::error::Result;
 use crate::domain::indicators::IndicatorSource;
 use crate::domain::model::{CashFlow, Deal, RateSpec};
+use crate::domain::prepayment::{apply_prepayment, PrepaymentPolicy};
 use crate::domain::principal::build_principal_schedule;
 use crate::domain::rates::RateEngine;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct CalcConfig {
     pub act_act_as_365: bool,
+    /// Behavioural prepayment; `None` keeps every deal on its contractual schedule.
+    pub prepayment: Option<Arc<PrepaymentPolicy>>,
 }
 
 impl CalcConfig {
+    /// Annual CPR applied to `deal`, if any.
+    pub fn cpr(&self, deal: &Deal) -> Option<f64> {
+        self.prepayment.as_ref().and_then(|p| p.cpr(deal))
+    }
+
     pub fn day_count(&self, deal: &Deal) -> DayCount {
         match deal.day_count {
             DayCount::ActActIsda if self.act_act_as_365 => DayCount::Act365,
@@ -174,15 +183,16 @@ pub fn build_cashflows(
     let mut out = Vec::with_capacity(events.len());
 
     for &event in &events {
-        let mut interest_cf = 0.0;
+        // leg 0 is the client rate, leg 1 (if any) the subsidy leg
+        let mut paid = [0.0_f64; 2];
         let mut paid_starts: Vec<Date> = Vec::new();
-        for leg in legs.iter_mut() {
+        for (k, leg) in legs.iter_mut().enumerate() {
             if event > leg.accrued_from {
                 leg.accrued += balance * rates.period_rate(leg.spec, leg.accrued_from, event)?;
                 leg.accrued_from = event;
             }
             if leg.pay_dates.binary_search(&event).is_ok() {
-                interest_cf += leg.accrued;
+                paid[k] += leg.accrued;
                 leg.accrued = 0.0;
                 paid_starts.push(leg.period_start);
                 leg.period_start = event;
@@ -205,11 +215,16 @@ pub fn build_cashflows(
             interest_period_start: ps,
             interest_period_end: pe,
             principal_cf,
-            interest_cf,
+            interest_cf: paid[0],
+            subsidy_cf: paid[1],
+            prepayment_cf: 0.0,
             balance_before,
             balance_after,
         });
         balance = balance_after;
+    }
+    if let Some(cpr) = cfg.cpr(deal) {
+        apply_prepayment(&mut out, deal.report_date, cpr);
     }
     Ok(out)
 }

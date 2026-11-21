@@ -8,6 +8,7 @@ pub mod discounting;
 pub mod error;
 pub mod indicators;
 pub mod model;
+pub mod prepayment;
 pub mod principal;
 pub mod rates;
 pub mod roll;

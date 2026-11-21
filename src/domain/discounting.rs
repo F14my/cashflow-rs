@@ -25,7 +25,10 @@ pub fn discount_cashflow(
     };
     let discounted_principal_cf = cashflow.principal_cf * discount_factor;
     let discounted_interest_cf = cashflow.interest_cf * discount_factor;
-    let discounted_total_cf = discounted_principal_cf + discounted_interest_cf;
+    let discounted_subsidy_cf = cashflow.subsidy_cf * discount_factor;
+    let discounted_prepayment_cf = cashflow.prepayment_cf * discount_factor;
+    let discounted_total_cf =
+        discounted_principal_cf + discounted_prepayment_cf + discounted_interest_cf + discounted_subsidy_cf;
     Ok(DiscountedCashFlow {
         cashflow,
         curve_date: curve.curve_date,
@@ -34,6 +37,8 @@ pub fn discount_cashflow(
         discount_factor,
         discounted_principal_cf,
         discounted_interest_cf,
+        discounted_subsidy_cf,
+        discounted_prepayment_cf,
         discounted_total_cf,
     })
 }
@@ -109,6 +114,8 @@ mod tests {
             interest_period_end: NaiveDate::from_ymd_opt(2024, 12, 31).unwrap(),
             principal_cf: 100.0,
             interest_cf: 10.0,
+            subsidy_cf: 0.0,
+            prepayment_cf: 0.0,
             balance_before: 100.0,
             balance_after: 0.0,
         };
@@ -140,6 +147,8 @@ mod tests {
                 interest_period_end: report,
                 principal_cf: 1.0,
                 interest_cf: 0.0,
+                subsidy_cf: 0.0,
+                prepayment_cf: 0.0,
                 balance_before: 0.0,
                 balance_after: 0.0,
             };
