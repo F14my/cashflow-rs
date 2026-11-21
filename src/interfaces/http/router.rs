@@ -1,4 +1,8 @@
-use super::dto::{deal_dto, records_to_table, ErrorDto, ValuationRequest, ValuationResponse};
+use super::dto::{
+    deal_dto, records_to_table, ErrorDto, IndicatorDto, ValuationRequest, ValuationResponse,
+};
+use super::portfolio;
+use crate::application::portfolio::PortfolioStore;
 use crate::application::valuation::{scenario_totals, ValuationService};
 use crate::domain::cashflow::CalcConfig;
 use crate::domain::curves::{Compounding, CurvePoint, CurveSet, ZeroCurve};
@@ -16,18 +20,31 @@ use std::sync::Arc;
 use std::time::Instant;
 
 const CURVE_TYPE: &str = "API";
-const MAX_BODY: usize = 128 * 1024 * 1024;
+const MAX_BODY: usize = 256 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
     pub indicators: Arc<IndicatorHistory>,
     pub threads: usize,
+    pub portfolios: Arc<PortfolioStore>,
 }
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/health", get(health))
         .route("/api/v1/valuations", post(valuations))
+        .route("/api/v1/portfolios", post(portfolio::create))
+        .route(
+            "/api/v1/portfolios/{id}",
+            get(portfolio::info).delete(portfolio::remove),
+        )
+        .route("/api/v1/portfolios/{id}/deals", post(portfolio::upload))
+        .route("/api/v1/portfolios/{id}/seal", post(portfolio::seal))
+        .route(
+            "/api/v1/portfolios/{id}/valuations",
+            post(portfolio::valuations),
+        )
+        .route("/api/v1/portfolios/{id}/movers", get(portfolio::movers))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(state)
 }
@@ -36,7 +53,7 @@ async fn health() -> Json<serde_json::Value> {
     Json(json!({"status": "ok", "service": "cashflow-rs", "version": env!("CARGO_PKG_VERSION")}))
 }
 
-struct ApiError(StatusCode, &'static str, String);
+pub struct ApiError(pub StatusCode, pub &'static str, pub String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
@@ -51,7 +68,7 @@ impl IntoResponse for ApiError {
     }
 }
 
-fn invalid(e: Error) -> ApiError {
+pub fn invalid(e: Error) -> ApiError {
     ApiError(
         StatusCode::UNPROCESSABLE_ENTITY,
         "validation_error",
@@ -129,21 +146,7 @@ fn value(
             seen
         }
     };
-    let indicators = if req.indicators.is_empty() {
-        state.indicators.clone()
-    } else {
-        let mut merged = (*state.indicators).clone();
-        for ind in &req.indicators {
-            let points = ind
-                .points
-                .iter()
-                .map(|p| Ok((parse_date(&p.effective_date)?, p.rate_percent / 100.0)))
-                .collect::<Result<Vec<_>>>()
-                .map_err(invalid)?;
-            merged.insert(&ind.code, points).map_err(invalid)?;
-        }
-        Arc::new(merged)
-    };
+    let indicators = merged_indicators(&state, &req.indicators)?;
     let (columns, rows) = records_to_table(&req.deals);
     let deals = parse_deal_records(&columns, &rows).map_err(invalid)?;
     let cfg = CalcConfig {
@@ -161,4 +164,25 @@ fn value(
         deal_count: deals.len(),
         elapsed_ms: started.elapsed().as_secs_f64() * 1e3,
     })
+}
+
+/// Server indicator histories with the request's series merged over them.
+pub fn merged_indicators(
+    state: &AppState,
+    extra: &[IndicatorDto],
+) -> std::result::Result<Arc<IndicatorHistory>, ApiError> {
+    if extra.is_empty() {
+        return Ok(state.indicators.clone());
+    }
+    let mut merged = (*state.indicators).clone();
+    for ind in extra {
+        let points = ind
+            .points
+            .iter()
+            .map(|p| Ok((parse_date(&p.effective_date)?, p.rate_percent / 100.0)))
+            .collect::<Result<Vec<_>>>()
+            .map_err(invalid)?;
+        merged.insert(&ind.code, points).map_err(invalid)?;
+    }
+    Ok(Arc::new(merged))
 }

@@ -10,4 +10,5 @@ pub mod indicators;
 pub mod model;
 pub mod principal;
 pub mod rates;
+pub mod roll;
 pub mod valuation;

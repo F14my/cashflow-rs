@@ -327,3 +327,92 @@ pub fn parse_deal_records(columns: &[String], rows: &[Vec<String>]) -> Result<Ve
     }
     Ok(deals)
 }
+
+/// A deal row that could not be turned into a deal.
+#[derive(Clone, Debug)]
+pub struct RejectedRow {
+    /// 1-based position of the record within the batch (0 = not tied to one record).
+    pub line: usize,
+    pub deal_id: Option<i64>,
+    pub error: String,
+}
+
+/// Result of parsing one batch of deal records.
+#[derive(Debug, Default)]
+pub struct DealBatch {
+    pub deals: Vec<Deal>,
+    /// Rows skipped by the currency filter.
+    pub skipped: usize,
+    pub rejected: Vec<RejectedRow>,
+}
+
+/// Parses a batch of in-memory deal records (columns as in `deals.csv`, empty cell = absent).
+/// Rows are parsed in parallel on `threads` threads; a bad row is reported in `rejected`
+/// and does not fail the batch. With `currency` set, rows of other currencies are skipped.
+pub fn parse_deal_batch(
+    columns: &[String],
+    rows: &[Vec<String>],
+    currency: Option<&str>,
+    threads: usize,
+) -> Result<DealBatch> {
+    if !columns.iter().any(|c| c.trim() == "deal_id") {
+        bail!("deal records have no deal_id field");
+    }
+    let headers = csv::StringRecord::from(columns.iter().map(|c| c.trim()).collect::<Vec<_>>());
+    let currency_col = columns.iter().position(|c| c.trim() == "currency_id");
+
+    let one = |line: usize, values: &Vec<String>| -> std::result::Result<Option<Deal>, RejectedRow> {
+        if values.len() != columns.len() {
+            return Err(RejectedRow {
+                line,
+                deal_id: None,
+                error: format!("expected {} values, got {}", columns.len(), values.len()),
+            });
+        }
+        if let Some(want) = currency {
+            let have = currency_col.map(|c| values[c].trim()).unwrap_or("");
+            if !have.eq_ignore_ascii_case(want) {
+                return Ok(None);
+            }
+        }
+        let record = csv::StringRecord::from(values.iter().map(|v| v.trim()).collect::<Vec<_>>());
+        let row: DealRow = record
+            .deserialize(Some(&headers))
+            .map_err(|e| RejectedRow { line, deal_id: None, error: e.to_string() })?;
+        to_deal(&row)
+            .map(Some)
+            .map_err(|e| RejectedRow { line, deal_id: Some(row.deal_id), error: e.to_string() })
+    };
+
+    let threads = threads.clamp(1, rows.len().max(1));
+    let chunk = rows.len().div_ceil(threads).max(1);
+    let parts: Vec<Vec<std::result::Result<Option<Deal>, RejectedRow>>> = std::thread::scope(|s| {
+        let handles: Vec<_> = rows
+            .chunks(chunk)
+            .enumerate()
+            .map(|(k, part)| {
+                let one = &one;
+                s.spawn(move || {
+                    part.iter()
+                        .enumerate()
+                        .map(|(i, r)| one(k * chunk + i + 1, r))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("deal parser worker panicked"))
+            .collect()
+    });
+
+    let mut batch = DealBatch { deals: Vec::with_capacity(rows.len()), ..Default::default() };
+    for item in parts.into_iter().flatten() {
+        match item {
+            Ok(Some(deal)) => batch.deals.push(deal),
+            Ok(None) => batch.skipped += 1,
+            Err(r) => batch.rejected.push(r),
+        }
+    }
+    Ok(batch)
+}

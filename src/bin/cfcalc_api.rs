@@ -4,13 +4,17 @@
 //! - `CFCALC_ADDR`       listen address (default `0.0.0.0:8080`);
 //! - `CFCALC_INDICATORS` default indicator histories, `CODE=FILE[,CODE=FILE]`
 //!   (default `CBKEY1M=data/cbkey1m.csv`);
-//! - `CFCALC_THREADS`    worker threads per request (default: all cores).
+//! - `CFCALC_THREADS`    worker threads per request (default: all cores);
+//! - `CFCALC_MAX_PORTFOLIOS` uploaded portfolios kept in memory (default 4);
+//! - `CFCALC_PORTFOLIO_IDLE_S` drop a portfolio idle this long (default 7200).
 
+use cashflow::application::portfolio::PortfolioStore;
 use cashflow::domain::indicators::IndicatorHistory;
 use cashflow::infrastructure::csv_indicators::load_indicator_csv;
 use cashflow::interfaces::http::{router, AppState};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 fn env_or(name: &str, default: &str) -> String {
     std::env::var(name)
@@ -44,9 +48,12 @@ async fn main() {
         }
     }
 
+    let max_portfolios = env_or("CFCALC_MAX_PORTFOLIOS", "4").parse().unwrap_or(4);
+    let idle = env_or("CFCALC_PORTFOLIO_IDLE_S", "7200").parse().unwrap_or(7200);
     let app = router(AppState {
         indicators: Arc::new(indicators),
         threads,
+        portfolios: Arc::new(PortfolioStore::new(max_portfolios, Duration::from_secs(idle))),
     });
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
